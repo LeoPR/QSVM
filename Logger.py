@@ -4,11 +4,12 @@ from enum import IntEnum
 class LogLevel(IntEnum):
     """Enum for logging levels, ordered by verbosity"""
     NONE = 0   # No logging
-    ERROR = 1  # Only errors
-    STEP = 2   # Errors and steps
-    MACRO = 3  # Errors, steps, and macros
-    INFO = 4   # Errors, steps, macros, and info
-    MICRO = 5  # All messages, including micro
+    WARNING = 1  # No logging
+    ERROR = 2  # Only errors
+    STEP = 3  # Errors and steps
+    MACRO = 4  # Errors, steps, and macros
+    INFO = 5   # Errors, steps, macros, and info
+    MICRO = 6  # All messages, including micro
 
 class Logger:
     # Default log level (can be overridden by LOG_LEVEL environment variable)
@@ -74,4 +75,9 @@ class Logger:
     def micro(msg):
         """Log MICRO message if level allows"""
         if Logger._log_level >= LogLevel.MICRO:
+            print(f"\033[1;35m    [{'█' * 10}]\033[0m {msg}")
+
+    def warning(msg):
+        """Log WARNING message if level allows"""
+        if Logger._log_level >= LogLevel.WARNING:
             print(f"\033[1;35m    [{'█' * 10}]\033[0m {msg}")
