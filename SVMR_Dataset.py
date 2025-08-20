@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from collections import OrderedDict
 import hashlib
+import numpy as np
 
 Logger.set_log_level("INFO")
 
@@ -21,40 +22,250 @@ RESIZE_ALG_MAP = {
 }
 
 
+class ImageQuantizer:
+    """
+    Quantiza imagens para diferentes níveis de cores.
+    Útil para criar datasets com diferentes níveis de complexidade visual.
+    """
+
+    @staticmethod
+    def quantize(image, levels=2, method='uniform', dithering=False):
+        """
+        Quantiza uma imagem para um número específico de níveis.
+
+        Args:
+            image: Tensor ou PIL Image
+            levels: Número de níveis de quantização (2 = preto e branco)
+            method: 'uniform', 'kmeans', 'otsu', 'adaptive'
+            dithering: Aplicar Floyd-Steinberg dithering (apenas para uniform)
+
+        Returns:
+            Imagem quantizada como tensor
+        """
+        if isinstance(image, Image.Image):
+            image = transforms.ToTensor()(image)
+
+        if method == 'uniform':
+            return ImageQuantizer._uniform_quantize(image, levels, dithering)
+        elif method == 'kmeans':
+            return ImageQuantizer._kmeans_quantize(image, levels)
+        elif method == 'otsu':
+            return ImageQuantizer._otsu_binarize(image)
+        elif method == 'adaptive':
+            return ImageQuantizer._adaptive_quantize(image, levels)
+        else:
+            raise ValueError(f"Unknown quantization method: {method}")
+
+    @staticmethod
+    def _uniform_quantize(image, levels, dithering=False):
+        """Quantização uniforme com opção de dithering."""
+        if dithering and levels == 2:
+            # Floyd-Steinberg dithering para binarização
+            return ImageQuantizer._floyd_steinberg_dither(image)
+
+        # Quantização simples uniforme
+        if levels == 2:
+            return (image > 0.5).float()
+
+        step = 1.0 / (levels - 1)
+        quantized = torch.round(image / step) * step
+        return quantized.clamp(0, 1)
+
+    @staticmethod
+    def _floyd_steinberg_dither(image):
+        """
+        Aplica Floyd-Steinberg dithering para binarização.
+        Produz preto e branco puro preservando detalhes visuais.
+        """
+        img = image.clone()
+        h, w = img.shape[-2:]
+
+        for y in range(h):
+            for x in range(w):
+                old_pixel = img[..., y, x]
+                new_pixel = torch.round(old_pixel)
+                img[..., y, x] = new_pixel
+                error = old_pixel - new_pixel
+
+                # Distribuir erro para pixels vizinhos
+                if x + 1 < w:
+                    img[..., y, x + 1] += error * 7 / 16
+                if y + 1 < h:
+                    if x > 0:
+                        img[..., y + 1, x - 1] += error * 3 / 16
+                    img[..., y + 1, x] += error * 5 / 16
+                    if x + 1 < w:
+                        img[..., y + 1, x + 1] += error * 1 / 16
+
+        return img.clamp(0, 1)
+
+    @staticmethod
+    def _kmeans_quantize(image, levels):
+        """Quantização usando K-means clustering."""
+        try:
+            from sklearn.cluster import KMeans
+        except ImportError:
+            Logger.warning("sklearn not available, falling back to uniform quantization")
+            return ImageQuantizer._uniform_quantize(image, levels, False)
+
+        # Reshape para lista de pixels
+        original_shape = image.shape
+        pixels = image.flatten().numpy().reshape(-1, 1)
+
+        # K-means clustering
+        kmeans = KMeans(n_clusters=levels, random_state=42, n_init=10)
+        kmeans.fit(pixels)
+
+        # Mapear cada pixel para o centro do cluster mais próximo
+        quantized = kmeans.cluster_centers_[kmeans.labels_]
+        quantized = quantized.reshape(original_shape)
+
+        return torch.tensor(quantized, dtype=torch.float32)
+
+    @staticmethod
+    def _otsu_binarize(image):
+        """Binarização usando método de Otsu."""
+        try:
+            from skimage.filters import threshold_otsu
+        except ImportError:
+            Logger.warning("skimage not available, using simple threshold")
+            return (image > 0.5).float()
+
+        img_np = image.numpy()
+        threshold = threshold_otsu(img_np)
+        binary = (img_np > threshold).astype(np.float32)
+
+        return torch.tensor(binary)
+
+    @staticmethod
+    def _adaptive_quantize(image, levels):
+        """Quantização adaptativa baseada no histograma."""
+        # Calcular histograma
+        hist, bins = torch.histogram(image.flatten(), bins=256)
+        hist = hist.float()
+
+        # Encontrar limiares que dividem o histograma em áreas iguais
+        cumsum = torch.cumsum(hist, dim=0)
+        total = cumsum[-1]
+
+        thresholds = []
+        for i in range(1, levels):
+            target = i * total / levels
+            idx = torch.searchsorted(cumsum, target)
+            thresholds.append(bins[min(idx, len(bins) - 1)].item())
+
+        # Aplicar quantização
+        quantized = torch.zeros_like(image)
+        for i, thresh in enumerate(thresholds):
+            mask = image > thresh
+            quantized[mask] = (i + 1) / (levels - 1)
+
+        return quantized
+
+
+def select_informative_patch(patches, num_candidates=5):
+    """
+    Seleciona um patch informativo baseado em múltiplas métricas.
+
+    Critérios:
+    - Variância (diversidade de valores)
+    - Entropia (quantidade de informação)
+    - Gradientes (bordas e texturas)
+    - Range dinâmico (evita patches muito escuros ou claros)
+    - Contraste local
+
+    Returns:
+        best_idx: Índice do melhor patch
+        scores: Scores de todos os patches
+    """
+    patches_float = patches.float() / 255.0
+    n_patches = patches.shape[0]
+
+    scores = torch.zeros(n_patches)
+
+    for i in range(n_patches):
+        patch = patches_float[i]
+
+        # 1. Variância (diversidade de valores)
+        variance = torch.var(patch).item()
+
+        # 2. Entropia aproximada (baseada em histograma)
+        hist = torch.histc(patch, bins=16, min=0, max=1)
+        hist = hist / hist.sum()
+        hist = hist[hist > 0]  # Remover zeros para evitar log(0)
+        entropy = -(hist * torch.log(hist)).sum().item() if len(hist) > 0 else 0
+
+        # 3. Magnitude dos gradientes (detecta bordas)
+        if patch.shape[0] >= 3 and patch.shape[1] >= 3:
+            # Calcular gradientes simples
+            dx = torch.abs(patch[1:, :] - patch[:-1, :]).mean().item()
+            dy = torch.abs(patch[:, 1:] - patch[:, :-1]).mean().item()
+            gradient_mag = (dx + dy) / 2
+        else:
+            gradient_mag = variance  # Fallback para patches muito pequenos
+
+        # 4. Range dinâmico (penaliza muito escuro ou muito claro)
+        mean_val = patch.mean().item()
+        range_score = 4 * mean_val * (1 - mean_val)  # Máximo em 0.5
+
+        # 5. Contraste local
+        min_val = patch.min().item()
+        max_val = patch.max().item()
+        contrast = max_val - min_val
+
+        # Score combinado (pesos ajustáveis)
+        scores[i] = (
+                0.25 * variance +
+                0.20 * entropy / 3.0 +  # Normalizar entropia
+                0.20 * gradient_mag +
+                0.20 * range_score +
+                0.15 * contrast
+        )
+
+    # Selecionar top candidatos e escolher o melhor
+    top_k = min(num_candidates, n_patches)
+    top_indices = torch.topk(scores, top_k).indices
+
+    # Entre os top candidatos, escolher o com melhor range dinâmico
+    best_idx = top_indices[0]
+    for idx in top_indices:
+        patch_mean = patches_float[idx].mean()
+        if 0.3 <= patch_mean <= 0.7:  # Preferir patches com brilho médio
+            best_idx = idx
+            break
+
+    return best_idx.item(), scores
+
+
 class ProcessedDataset(torch.utils.data.Dataset):
     """
-    Creates a processed version of a dataset with optional resizing and compression artifacts.
-    Automatically infers processing needs based on parameters.
+    Creates a processed version of a dataset with optional resizing, compression and quantization.
 
     Features:
-    - Automatic resizing detection (if target_size != original size)
-    - Automatic compression detection (based on image_format)
-    - Compatible with torch.utils.data.ConcatDataset
-    - Maintains original dataset structure for easy pairing
+    - Automatic resizing detection
+    - Compression artifacts simulation
+    - Quantization (reduce color levels, including binarization)
     - Caches processed data with zstd compression
-
-    Args:
-        original_ds: Dataset containing images (PIL Images or torch Tensors) and labels
-        target_size: (width, height) for output images
-        resize_alg: PIL resize algorithm (e.g., Image.BICUBIC)
-        image_format: None/'RAW' for no compression, 'JPEG'/'PNG' for compression
-        quality: Compression quality (1-100) for lossy formats
-        cache_dir: Directory for processed data caching
-        cache_rebuild: If True, rebuild cache even if it exists
     """
 
     def __init__(self, original_ds, target_size, resize_alg,
-                 image_format=None, quality=None, cache_dir="./cache", cache_rebuild=False):
+                 image_format=None, quality=None,
+                 quantization_levels=None, quantization_method='uniform',
+                 cache_dir="./cache", cache_rebuild=False):
+
         self.original_ds = original_ds
         self.target_size = target_size
         self.resize_alg = resize_alg
         self.image_format = image_format.upper() if image_format else None
         self.quality = quality
+        self.quantization_levels = quantization_levels
+        self.quantization_method = quantization_method
         self.cache_rebuild = cache_rebuild
 
         # Auto-detect processing needs
         self.needs_resize = (self.target_size != self._get_original_size())
         self.needs_compression = self.image_format in ['JPEG', 'PNG']
+        self.needs_quantization = quantization_levels is not None
 
         # Create unique cache name based on parameters
         self.cache_path = self._create_cache_path(cache_dir)
@@ -84,13 +295,19 @@ class ProcessedDataset(torch.utils.data.Dataset):
         alg_name = RESIZE_ALG_MAP.get(self.resize_alg, "unknown")
         format_info = f"{self.image_format}_q{self.quality}" if self.needs_compression else "raw"
 
+        # Add quantization info
+        if self.needs_quantization:
+            quant_info = f"_quant{self.quantization_levels}_{self.quantization_method}"
+        else:
+            quant_info = ""
+
         return os.path.join(
             cache_dir,
-            f"processed_{resize_info}_{alg_name}_{format_info}.pt.zst"
+            f"processed_{resize_info}_{alg_name}_{format_info}{quant_info}.pt.zst"
         )
 
     def _process_image(self, img):
-        """Process single image with inferred transformations"""
+        """Process single image with all transformations"""
         # Convert tensor to PIL Image if needed
         if isinstance(img, torch.Tensor):
             img = transforms.ToPILImage()(img)
@@ -109,14 +326,30 @@ class ProcessedDataset(torch.utils.data.Dataset):
             buffer.seek(0)
             img = Image.open(buffer)
 
-        return transforms.ToTensor()(img)
+        # Convert to tensor
+        img_tensor = transforms.ToTensor()(img)
+
+        # Apply quantization if configured
+        if self.needs_quantization:
+            img_tensor = ImageQuantizer.quantize(
+                img_tensor,
+                levels=self.quantization_levels,
+                method=self.quantization_method,
+                dithering=(self.quantization_method == 'uniform' and self.quantization_levels == 2)
+            )
+
+        return img_tensor
 
     def _process_and_cache(self):
         """Process all images and save to cache with zstd compression"""
         processed_images = []
         labels = []
 
-        for img, label in tqdm(self.original_ds, desc="Processing Dataset"):
+        desc = "Processing Dataset"
+        if self.needs_quantization:
+            desc += f" (Quantizing to {self.quantization_levels} levels)"
+
+        for img, label in tqdm(self.original_ds, desc=desc):
             processed_img = self._process_image(img)
             processed_images.append(processed_img)
             labels.append(label)
@@ -176,12 +409,18 @@ class ProcessedDataset(torch.utils.data.Dataset):
 
     def _get_config(self):
         """Get configuration dictionary for verification"""
-        return {
+        config = {
             'target_size': self.target_size,
             'resize_alg': RESIZE_ALG_MAP.get(self.resize_alg, "unknown"),
             'image_format': self.image_format,
             'quality': self.quality
         }
+
+        if self.needs_quantization:
+            config['quantization_levels'] = self.quantization_levels
+            config['quantization_method'] = self.quantization_method
+
+        return config
 
     def __len__(self):
         return len(self.data)
@@ -590,36 +829,60 @@ class SuperResPatchDataset(torch.utils.data.Dataset):
         return self.large_patch_extractor.reconstruct_image(patches, device)
 
 
-def show_sample_images(samples, sample_index, zoom_ratio=1.0, patch_coords=None):
+def show_sample_images(samples, sample_index, zoom_ratio=0.5, patch_coords=None, cmap='viridis'):
     """
-    Display sample images side by side, with optional patch location highlighting.
+    Display sample images side by side with colorful visualization.
+
+    Parameters:
+        samples: Dictionary where each key is a title and each value is an image tensor
+        sample_index: Identifier for the sample (shown in the figure title)
+        zoom_ratio: Factor to scale the figure size (0.5 = half size)
+        patch_coords: Dict with patch rectangle coordinates
+        cmap: Colormap to use (default 'viridis' for colorful display)
     """
     Logger.info(f"Displaying sample images for sample index: {sample_index}")
     num_images = len(samples)
-    fig, axes = plt.subplots(1, num_images, figsize=(4 * num_images, 4))
+
+    # Reduced figure size (half of original)
+    fig, axes = plt.subplots(1, num_images, figsize=(3 * num_images * zoom_ratio, 3 * zoom_ratio))
+
     if num_images == 1:
         axes = [axes]
 
     for ax, (title, tensor) in zip(axes, samples.items()):
-        pil_image = transforms.ToPILImage()(tensor)
-        width, height = pil_image.size
-        ax.imshow(pil_image, cmap='gray')
-        ax.set_title(f"{title}\nSize: {width}x{height}")
+        # Convert to numpy for display
+        if tensor.dim() == 3 and tensor.shape[0] == 1:
+            # Single channel image
+            img_array = tensor.squeeze(0).numpy()
+        else:
+            img_array = tensor.numpy()
+
+        # Display with colorful colormap
+        im = ax.imshow(img_array, cmap=cmap)
+
+        # Add title with size info
+        if hasattr(tensor, 'shape'):
+            height, width = img_array.shape[-2:]
+            ax.set_title(f"{title}\nSize: {width}x{height}", fontsize=8)
+        else:
+            ax.set_title(title, fontsize=8)
+
         ax.axis("off")
 
         # Draw patch rectangle if provided
         if patch_coords and title in patch_coords:
             top, left, patch_h, patch_w = patch_coords[title]
             rect = plt.Rectangle((left, top), patch_w, patch_h,
-                                 linewidth=1, edgecolor='r', facecolor='none')
+                                 linewidth=10, edgecolor='r', facecolor='none')
             ax.add_patch(rect)
 
-    fig.suptitle(f"Sample Index: {sample_index}")
-    if zoom_ratio != 1.0:
-        current_size = fig.get_size_inches()
-        new_size = (current_size[0] * zoom_ratio, current_size[1] * zoom_ratio)
-        fig.set_size_inches(new_size)
+    # Add main title
+    fig.suptitle(f"Sample Index: {sample_index}", fontsize=10)
+
+    # Adjust layout
     plt.tight_layout(rect=[0, 0, 1, 0.95])
+
+    # Show with block=False for non-blocking display
     plt.show(block=True)
     Logger.info("Displayed sample images successfully")
 
@@ -631,19 +894,24 @@ def test_optimized_dataset():
     """
     Logger.step("Testing Optimized SuperResPatchDataset")
 
-    # Configuration
+    # Configuration with quantization options
     low_res_config = {
         'target_size': (14, 14),
         'resize_alg': Image.BICUBIC,
         'image_format': None,
-        'quality': None
+        'quality': None,
+        'quantization_levels': None,  # Can be 2 for binary, 4 for 4-level, etc.
+        'quantization_method': 'uniform'  # or 'otsu', 'kmeans', 'adaptive'
     }
     high_res_config = {
         'target_size': (28, 28),
         'resize_alg': Image.BICUBIC,
         'image_format': None,
-        'quality': None
+        'quality': None,
+        'quantization_levels': None,  # Keep high-res without quantization usually
+        'quantization_method': 'uniform'
     }
+
     small_patch_size = (2, 2)
     large_patch_size = (4, 4)
     stride = 1
@@ -716,8 +984,8 @@ def test_optimized_dataset():
     Logger.info(f"  Large patches - Hit rate: {stats['large_patches']['hit_rate']:.2%}")
     Logger.info(f"  Memory cache sizes: {stats['small_patches']['memory_cache_size']}/{max_memory_cache}")
 
-    # Test reconstruction
-    Logger.step("Testing image reconstruction")
+    # Test reconstruction with informative patch selection
+    Logger.step("Testing image reconstruction with informative patch selection")
 
     img_idx = 1
     label = dataset.low_res_ds.labels[img_idx].item()
@@ -730,8 +998,17 @@ def test_optimized_dataset():
     low_tensor = dataset.low_res_ds.data[img_idx]
     high_tensor = dataset.high_res_ds.data[img_idx]
 
-    # Get a sample patch for visualization
-    patch_idx = dataset.num_patches_per_image // 2
+    # Get all patches and select most informative one
+    low_pil = transforms.ToPILImage()(low_tensor.squeeze())
+    high_pil = transforms.ToPILImage()(high_tensor.squeeze())
+
+    small_patches = dataset.small_patch_extractor.process(low_pil, img_idx)
+    large_patches = dataset.large_patch_extractor.process(high_pil, img_idx)
+
+    # Select informative patch using new selection function
+    patch_idx, scores = select_informative_patch(small_patches, num_candidates=10)
+    Logger.info(f"Selected patch {patch_idx} as most informative (score: {scores[patch_idx]:.4f})")
+
     global_idx = img_idx * dataset.num_patches_per_image + patch_idx
     X, y = dataset[global_idx]
     small_patch = X[3]
@@ -766,21 +1043,22 @@ def test_optimized_dataset():
     recon_low_tensor = (recon_low.float() / 255.0).unsqueeze(0)
     recon_high_tensor = (recon_high.float() / 255.0).unsqueeze(0)
 
-    # Display all images
+    # Display all images with reduced size and colorful visualization
     samples = {
-        'Low Resolution': low_tensor,
-        'High Resolution': high_tensor,
-        f'Small Patch (idx {patch_idx})': small_upsampled.unsqueeze(0),
-        f'Large Patch (idx {patch_idx})': large_upsampled.unsqueeze(0),
-        'Reconstructed Low': recon_low_tensor,
-        'Reconstructed High': recon_high_tensor
+        'Low Res': low_tensor,
+        'High Res': high_tensor,
+        f'Small Patch #{patch_idx}': small_upsampled.unsqueeze(0),
+        f'Large Patch #{patch_idx}': large_upsampled.unsqueeze(0),
+        'Recon Low': recon_low_tensor,
+        'Recon High': recon_high_tensor
     }
 
     show_sample_images(
         samples,
         sample_index=f"Image {img_idx} (Label: {label})",
         patch_coords=patch_coords,
-        zoom_ratio=1.5
+        zoom_ratio=1,  # Half size window
+        cmap='viridis'  # Colorful display
     )
 
     # Performance comparison
@@ -792,8 +1070,7 @@ def test_optimized_dataset():
     dataset.clear_memory_caches()
 
     # Measure time for accessing all patches from one image
-    # Use a valid image index (must be less than dataset.num_images)
-    img_idx = min(10, dataset.num_images - 1)  # Use image 10 or last available
+    img_idx = min(10, dataset.num_images - 1)
     start_idx = img_idx * dataset.num_patches_per_image
     end_idx = start_idx + dataset.num_patches_per_image
 
@@ -833,160 +1110,54 @@ def test_optimized_dataset():
     return dataset
 
 
-def benchmark_cache_performance():
-    """
-    Benchmark the performance improvements of the optimized caching system.
-    """
-    Logger.step("Benchmarking Cache Performance")
+def test_quantization():
+    """Test different quantization methods on sample images."""
+    Logger.step("Testing Image Quantization Methods")
 
-    import time
-    import random
-
-    # Configuration
-    config = {
-        'low_res_config': {
-            'target_size': (14, 14),
-            'resize_alg': Image.BICUBIC,
-            'image_format': None,
-            'quality': None
-        },
-        'high_res_config': {
-            'target_size': (28, 28),
-            'resize_alg': Image.BICUBIC,
-            'image_format': None,
-            'quality': None
-        },
-        'small_patch_size': (2, 2),
-        'large_patch_size': (4, 4),
-        'stride': 1,
-        'scale_factor': 2,
-        'cache_dir': "./cache",
-        'cache_rebuild': False
-    }
-
-    # Load subset of MNIST for benchmarking
+    # Load a sample image
     transform = transforms.Compose([transforms.ToTensor()])
-    full_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    mnist = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 
-    # Use subset for faster benchmarking
-    subset_indices = list(range(100))  # First 100 images
-    subset = torch.utils.data.Subset(full_dataset, subset_indices)
+    # Get a sample image
+    img_tensor, label = mnist[0]
 
-    # Create optimized dataset with different cache sizes
-    cache_sizes = [0, 10, 50, 100]
-    results = {}
+    # Test different quantization methods
+    methods = [
+        ('Original', None, None),
+        ('Binary (Uniform)', 2, 'uniform'),
+        ('Binary (Otsu)', 2, 'otsu'),
+        ('4-Level (Uniform)', 4, 'uniform'),
+        ('4-Level (Adaptive)', 4, 'adaptive'),
+        ('8-Level (Uniform)', 8, 'uniform'),
+    ]
 
-    for cache_size in cache_sizes:
-        Logger.info(f"\nTesting with memory cache size: {cache_size}")
+    # Create figure with smaller size
+    fig, axes = plt.subplots(2, 3, figsize=(6, 4))
+    axes = axes.flatten()
 
-        dataset = SuperResPatchDataset(
-            original_ds=subset,
-            **config,
-            max_memory_cache=cache_size
-        )
+    for idx, (title, levels, method) in enumerate(methods):
+        if levels is None:
+            # Original image
+            quantized = img_tensor
+        else:
+            # Apply quantization
+            quantized = ImageQuantizer.quantize(
+                img_tensor,
+                levels=levels,
+                method=method,
+                dithering=(method == 'uniform' and levels == 2)
+            )
 
-        # Clear any existing memory cache
-        dataset.clear_memory_caches()
+        # Display
+        axes[idx].imshow(quantized.squeeze(), cmap='plasma')
+        axes[idx].set_title(title, fontsize=8)
+        axes[idx].axis('off')
 
-        # Test 1: Sequential access (typical training pattern)
-        sequential_times = []
-        num_test_images = min(10, len(subset))  # Test on up to 10 images
-        for img_idx in range(num_test_images):
-            start_idx = img_idx * dataset.num_patches_per_image
-            end_idx = start_idx + dataset.num_patches_per_image
-
-            start_time = time.time()
-            for idx in range(start_idx, end_idx):
-                X, y = dataset[idx]
-            sequential_times.append(time.time() - start_time)
-
-        # Test 2: Random access
-        random_times = []
-        num_random_samples = min(100, len(dataset))
-        random_indices = random.sample(range(len(dataset)), num_random_samples)
-
-        for idx in random_indices:
-            start_time = time.time()
-            X, y = dataset[idx]
-            random_times.append(time.time() - start_time)
-
-        # Get cache statistics
-        stats = dataset.get_cache_stats()
-
-        results[cache_size] = {
-            'sequential_avg': sum(sequential_times) / len(sequential_times),
-            'random_avg': sum(random_times) / len(random_times),
-            'hit_rate': stats['small_patches']['hit_rate'],
-            'sequential_times': sequential_times,
-            'random_times': random_times
-        }
-
-        Logger.info(f"  Sequential access avg: {results[cache_size]['sequential_avg']:.4f}s")
-        Logger.info(f"  Random access avg: {results[cache_size]['random_avg']:.4f}s")
-        Logger.info(f"  Cache hit rate: {results[cache_size]['hit_rate']:.2%}")
-
-    # Visualize results
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-
-    # Plot 1: Average access times
-    ax = axes[0]
-    cache_sizes_str = [str(s) for s in cache_sizes]
-    sequential_avgs = [results[s]['sequential_avg'] for s in cache_sizes]
-    random_avgs = [results[s]['random_avg'] for s in cache_sizes]
-
-    x = range(len(cache_sizes))
-    width = 0.35
-    ax.bar([i - width / 2 for i in x], sequential_avgs, width, label='Sequential', color='blue')
-    ax.bar([i + width / 2 for i in x], random_avgs, width, label='Random', color='orange')
-    ax.set_xlabel('Memory Cache Size')
-    ax.set_ylabel('Average Access Time (s)')
-    ax.set_title('Access Time vs Cache Size')
-    ax.set_xticks(x)
-    ax.set_xticklabels(cache_sizes_str)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # Plot 2: Hit rates
-    ax = axes[1]
-    hit_rates = [results[s]['hit_rate'] * 100 for s in cache_sizes]
-    ax.plot(cache_sizes, hit_rates, 'g-o', linewidth=2, markersize=8)
-    ax.set_xlabel('Memory Cache Size')
-    ax.set_ylabel('Cache Hit Rate (%)')
-    ax.set_title('Cache Hit Rate vs Cache Size')
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim([0, 105])
-
-    # Plot 3: Speedup
-    ax = axes[2]
-    baseline_seq = results[0]['sequential_avg']
-    baseline_rand = results[0]['random_avg']
-    speedup_seq = [baseline_seq / results[s]['sequential_avg'] for s in cache_sizes]
-    speedup_rand = [baseline_rand / results[s]['random_avg'] for s in cache_sizes]
-
-    ax.plot(cache_sizes, speedup_seq, 'b-o', label='Sequential', linewidth=2, markersize=8)
-    ax.plot(cache_sizes, speedup_rand, 'r-o', label='Random', linewidth=2, markersize=8)
-    ax.set_xlabel('Memory Cache Size')
-    ax.set_ylabel('Speedup Factor')
-    ax.set_title('Speedup vs Cache Size')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
-
-    plt.suptitle('Cache Performance Benchmark Results', fontsize=14, y=1.05)
+    plt.suptitle(f"Quantization Methods Comparison (Label: {label})", fontsize=10)
     plt.tight_layout()
     plt.show()
 
-    Logger.info("\n" + "=" * 50)
-    Logger.info("BENCHMARK SUMMARY")
-    Logger.info("=" * 50)
-    Logger.info(f"Best cache size for sequential access: {cache_sizes[sequential_avgs.index(min(sequential_avgs))]}")
-    Logger.info(f"Best cache size for random access: {cache_sizes[random_avgs.index(min(random_avgs))]}")
-    Logger.info(f"Maximum speedup achieved (sequential): {max(speedup_seq):.2f}x")
-    Logger.info(f"Maximum speedup achieved (random): {max(speedup_rand):.2f}x")
-
-    return results
+    Logger.info("Quantization test completed!")
 
 
 if __name__ == "__main__":
@@ -994,8 +1165,8 @@ if __name__ == "__main__":
     Logger.macro("Running Optimized SuperResPatchDataset Test")
     dataset = test_optimized_dataset()
 
-    # Run performance benchmark
-    Logger.macro("Running Cache Performance Benchmark")
-    benchmark_results = benchmark_cache_performance()
+    # Test quantization methods
+    Logger.macro("Testing Quantization Methods")
+    test_quantization()
 
     Logger.macro("All tests completed successfully!")
