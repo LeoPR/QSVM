@@ -191,6 +191,8 @@ class FullyQuantumSVM:
             if abs(angle) > 1e-8:  # Só aplicar se o ângulo for significativo
                 qml.RY(angle, wires=i)
 
+        # X_quantum = 2*np.pi * (X_scaled - X_scaled.min()) / (X_scaled.max() - X_scaled.min())
+
     def quantum_inner_product(self, x1, x2):
         """Produto interno quântico rápido usando SWAP test"""
         dev_temp = qml.device(device_type, wires=5)  # Usar dispositivo otimizado
@@ -338,6 +340,7 @@ class VariationalQuantumSVM:
                 # Emaranhamento
                 for i in range(self.n_qubits - 1):
                     qml.CNOT(wires=[i, i + 1])
+
 
             # Medição
             return qml.expval(qml.PauliZ(0))

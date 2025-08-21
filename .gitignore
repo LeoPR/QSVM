@@ -5,3 +5,4 @@
 /cache/*_patches
 /cache/models
 /cache/*_res
+/qsvm_figs
