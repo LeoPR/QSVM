@@ -447,7 +447,7 @@ def evaluate_precomputed_kernel(K_train, K_test, y_train, y_test, name: str):
 # Pipeline principal
 # ------------------------------------------------------------------
 
-def main(random_state: int = 42, test_size: float = 0.3, max_qubits: int = 4):
+def main(random_state: int = 42, test_size: float = 0.3, max_qubits: int = 5):
     set_seed(random_state)
 
     # Dados

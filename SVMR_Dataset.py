@@ -7,6 +7,7 @@ from torchvision import transforms, datasets
 from Logger import Logger
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
+from torchvision.transforms import functional as TF
 from tqdm import tqdm
 from collections import OrderedDict
 import hashlib
@@ -101,41 +102,59 @@ class ImageQuantizer:
 
     @staticmethod
     def _kmeans_quantize(image, levels):
-        """Quantização usando K-means clustering."""
+        """Quantização usando K-means clustering.
+
+        Observações:
+        - Se `image` estiver na GPU, trazemos para CPU com detach().cpu() antes de converter
+          para NumPy, evitando erros e dinâmica do autograd.
+        - Reconstruímos o tensor final e movemos de volta para o mesmo device do `image`.
+        - Usamos float32 para reduzir uso de memória.
+        """
         try:
             from sklearn.cluster import KMeans
         except ImportError:
             Logger.warning("sklearn not available, falling back to uniform quantization")
             return ImageQuantizer._uniform_quantize(image, levels, False)
 
-        # Reshape para lista de pixels
-        original_shape = image.shape
-        pixels = image.flatten().numpy().reshape(-1, 1)
+        # Reshape para lista de pixels (garantir CPU, detach e array contíguo)
+        original_shape = tuple(image.shape)
+        pixels_np = image.detach().cpu().flatten().numpy().reshape(-1, 1)
 
-        # K-means clustering
+        # K-means clustering (sklearn trabalha em CPU)
         kmeans = KMeans(n_clusters=levels, random_state=42, n_init=10)
-        kmeans.fit(pixels)
+        kmeans.fit(pixels_np)
 
         # Mapear cada pixel para o centro do cluster mais próximo
-        quantized = kmeans.cluster_centers_[kmeans.labels_]
-        quantized = quantized.reshape(original_shape)
+        quantized_np = kmeans.cluster_centers_[kmeans.labels_].reshape(original_shape)
 
-        return torch.tensor(quantized, dtype=torch.float32)
+        # Converter de volta para tensor no mesmo device do input, com dtype float32
+        quantized_t = torch.from_numpy(np.ascontiguousarray(quantized_np)).to(image.device).float()
+
+        return quantized_t
 
     @staticmethod
     def _otsu_binarize(image):
-        """Binarização usando método de Otsu."""
+        """Binarização usando método de Otsu.
+
+        Observações:
+        - Trazer para CPU e desconectar do grafo antes da conversão para NumPy.
+        - Retornar tensor no mesmo dispositivo do `image` (útil quando você roda em GPU).
+        """
         try:
             from skimage.filters import threshold_otsu
         except ImportError:
             Logger.warning("skimage not available, using simple threshold")
             return (image > 0.5).float()
 
-        img_np = image.numpy()
+        # Garantir CPU, detach e numpy contíguo
+        img_np = image.detach().cpu().numpy()
         threshold = threshold_otsu(img_np)
-        binary = (img_np > threshold).astype(np.float32)
+        binary_np = (img_np > threshold).astype(np.float32)
 
-        return torch.tensor(binary)
+        # Converter de volta para tensor no mesmo device do input
+        binary_t = torch.from_numpy(np.ascontiguousarray(binary_np)).to(image.device).float()
+
+        return binary_t
 
     @staticmethod
     def _adaptive_quantize(image, levels):
@@ -151,14 +170,21 @@ class ImageQuantizer:
         thresholds = []
         for i in range(1, levels):
             target = i * total / levels
-            idx = torch.searchsorted(cumsum, target)
-            thresholds.append(bins[min(idx, len(bins) - 1)].item())
+            # searchsorted retorna tensor; converter para int Python
+            idx = int(torch.searchsorted(cumsum, target).item())
+            # Garantir faixa válida para indexar em 'bins'
+            idx = max(0, min(idx, len(bins) - 1))
+            thresholds.append(bins[idx].item())
 
-        # Aplicar quantização
-        quantized = torch.zeros_like(image)
-        for i, thresh in enumerate(thresholds):
-            mask = image > thresh
-            quantized[mask] = (i + 1) / (levels - 1)
+        if len(thresholds) == 0:
+            return torch.zeros_like(image)
+
+        # Quantização vetorizada:
+        # bucketize conta quantos thresholds são estritamente menores que cada pixel (right=False),
+        # replicando a lógica "image > thresh".
+        thresholds_t = torch.tensor(thresholds, dtype=image.dtype, device=image.device)
+        levels_idx = torch.bucketize(image, thresholds_t, right=False)  # valores em [0, levels-1]
+        quantized = levels_idx.to(image.dtype) / (levels - 1)
 
         return quantized
 
@@ -379,7 +405,7 @@ class ProcessedDataset(torch.utils.data.Dataset):
         return data_tensor, labels_tensor
 
     def _load_cache(self):
-        """Load cached data with zstd decompression and validation"""
+        """Load cached data with zstd decompression and validation (GPU/CPU safe)"""
         Logger.info(f"Loading dataset from cache at {self.cache_path}")
         try:
             with open(self.cache_path, 'rb') as f:
@@ -388,7 +414,8 @@ class ProcessedDataset(torch.utils.data.Dataset):
                 with dctx.stream_reader(f) as reader:
                     decompressed_data = reader.read()
             buffer = io.BytesIO(decompressed_data)
-            loaded = torch.load(buffer)
+            # Garantir load seguro independente do device onde foi salvo
+            loaded = torch.load(buffer, map_location="cpu")
 
             # Validate cache contents
             if 'data' not in loaded or 'labels' not in loaded:
@@ -485,26 +512,34 @@ class OptimizedPatchExtractor:
         return os.path.join(self.cache_dir, f"{config_str}_{config_hash}.pt.zst")
 
     def _extract_all_patches(self, image):
-        """Extract all patches from an image at once."""
+        """Extract all patches from an image at once (uses pil_to_tensor for efficiency).
+
+        Returns:
+            - If single-channel image: Tensor [num_patches, H, W] (uint8)  <-- backwards compatible
+            - If multi-channel image: Tensor [num_patches, C, H, W] (uint8)
+        """
         Logger.micro(f"Extracting all {self.num_patches_per_image} patches from image")
 
-        # Convert image to tensor (shape: [C, H, W])
-        tensor = transforms.ToTensor()(image)
-        # Add batch dimension: [1, C, H, W]
-        tensor = tensor.unsqueeze(0)
+        # pil_to_tensor retorna uint8 com shape [C, H, W] diretamente (evita *255 e round)
+        tensor = TF.pil_to_tensor(image)  # uint8 [C, H, W]
+        C, H, W = tensor.shape
+        # Colocar batch e converter para float para usar unfold (preserva range 0-255)
+        tensor = tensor.unsqueeze(0).float()  # [1, C, H, W] float in [0,255]
 
-        # Use unfold to extract all patches at once
         patch_h, patch_w = self.patch_size
-        patches = F.unfold(tensor, kernel_size=(patch_h, patch_w), stride=self.stride)
+        # F.unfold opera com [N, C, H, W] e retorna [N, C*kh*kw, L]
+        patches_unf = F.unfold(tensor, kernel_size=(patch_h, patch_w), stride=self.stride)
+        # [1, C*kh*kw, L] -> [L, C*kh*kw]
+        patches_flat = patches_unf.squeeze(0).transpose(0, 1)
+        # reshape -> [L, C, kh, kw]
+        patches = patches_flat.view(-1, C, patch_h, patch_w)
+        # Converter para uint8 para armazenar/serializar eficientemente
+        patches = patches.round().to(torch.uint8)
 
-        # Reshape: [1, C*patch_h*patch_w, num_patches] -> [num_patches, patch_h, patch_w]
-        patches = patches.squeeze(0).transpose(0, 1)
-        patches = patches.reshape(-1, patch_h, patch_w)
-
-        # Convert to uint8 for storage efficiency
-        patches = (patches * 255).round().to(torch.uint8)
-
-        return patches
+        # Compatibilidade com código legado: para imagens single-channel, retornar [L,H,W]
+        if C == 1:
+            return patches.squeeze(1)  # [L, H, W]
+        return patches  # [L, C, H, W]
 
     def _update_memory_cache(self, image_index, patches):
         """Update LRU memory cache."""
@@ -522,27 +557,30 @@ class OptimizedPatchExtractor:
             Logger.micro(f"Evicted image {evicted_idx} from memory cache")
 
     def _save_compressed_patches(self, patches, cache_path):
-        """Save patches with zstd compression."""
+        """Save patches with zstd compression using threads for speed."""
         buffer = io.BytesIO()
         torch.save(patches, buffer)
         buffer.seek(0)
 
+        # Usar threads para acelerar compressão em CPUs multi-core
         with open(cache_path, 'wb') as f:
-            cctx = zstd.ZstdCompressor(level=3)  # Higher compression for patches
+            cctx = zstd.ZstdCompressor(level=3, threads=-1)
+            # Para arquivos não muito grandes é OK fazer compress() direto; threads acelera
             compressed = cctx.compress(buffer.read())
             f.write(compressed)
 
         Logger.micro(f"Saved compressed patches to {cache_path}")
 
     def _load_compressed_patches(self, cache_path):
-        """Load patches with zstd decompression and error handling."""
+        """Load patches with zstd decompression and error handling (CPU-safe)"""
         try:
             with open(cache_path, 'rb') as f:
                 dctx = zstd.ZstdDecompressor()
                 decompressed = dctx.decompress(f.read())
 
             buffer = io.BytesIO(decompressed)
-            patches = torch.load(buffer)
+            # Carregar no CPU por segurança (compatibilidade com diferentes dispositivos)
+            patches = torch.load(buffer, map_location="cpu")
 
             # Validate patches shape
             if patches.shape[0] != self.num_patches_per_image:
@@ -670,7 +708,13 @@ class OptimizedPatchExtractor:
 
     def reconstruct_image(self, patches, device=torch.device("cpu")):
         """
-        Reconstruct an image from a set of patches.
+        Reconstruct an image from a set of patches using F.fold (vectorized).
+
+        Accepts:
+            patches: Tensor [L, H, W] (uint8) or [L, C, H, W] (uint8)
+        Returns:
+            - single-channel: Tensor [recon_h, recon_w] uint8
+            - multi-channel: Tensor [C, recon_h, recon_w] uint8
         """
         num_h = self.num_patches_h
         num_w = self.num_patches_w
@@ -679,20 +723,42 @@ class OptimizedPatchExtractor:
         recon_h = patch_h + (num_h - 1) * self.stride
         recon_w = patch_w + (num_w - 1) * self.stride
 
-        reconstructed = torch.zeros((recon_h, recon_w), dtype=torch.float32, device=device)
-        weight = torch.zeros((recon_h, recon_w), dtype=torch.float32, device=device)
+        # Detectar formato de patches e preparar tensor [L, C, ph, pw]
+        if patches.dim() == 3:
+            # [L, H, W] -> [L, 1, H, W]
+            patches_f = patches.unsqueeze(1).float() / 255.0
+        elif patches.dim() == 4:
+            # [L, C, H, W]
+            patches_f = patches.float() / 255.0
+        else:
+            raise ValueError("Unsupported patches shape for reconstruction")
 
-        for i in range(num_h):
-            for j in range(num_w):
-                idx = i * num_w + j
-                top = i * self.stride
-                left = j * self.stride
-                reconstructed[top:top + patch_h, left:left + patch_w] += patches[idx].float() / 255.0
-                weight[top:top + patch_h, left:left + patch_w] += 1
+        L, C, ph, pw = patches_f.shape
+        # Mover para device solicitado (CPU por padrão). fold fará soma sobre posições.
+        patches_f = patches_f.to(device)
 
-        reconstructed /= weight.clamp(min=1e-6)
-        reconstructed = (reconstructed * 255).round().to(torch.uint8)
-        return reconstructed
+        # Preparar para fold: precisamos [1, C*ph*pw, L]
+        patches_flat = patches_f.view(L, -1).transpose(0, 1).unsqueeze(0)  # [1, C*ph*pw, L]
+
+        # Somatório das contribuições (reconstrução) usando fold
+        recon_sum = F.fold(patches_flat, output_size=(recon_h, recon_w),
+                           kernel_size=(ph, pw), stride=self.stride)  # [1, C, H, W]
+
+        # Criar matriz de pesos (quantas vezes cada pixel foi somado) usando ones
+        ones = torch.ones_like(patches_f, dtype=patches_f.dtype, device=device)
+        ones_flat = ones.view(L, -1).transpose(0, 1).unsqueeze(0)  # [1, C*ph*pw, L]
+        weight = F.fold(ones_flat, output_size=(recon_h, recon_w),
+                        kernel_size=(ph, pw), stride=self.stride)  # [1, C, H, W]
+
+        # Evitar divisão por zero
+        recon = recon_sum / weight.clamp(min=1e-6)
+
+        # Converter de volta para uint8
+        recon = (recon * 255.0).round().to(torch.uint8).squeeze(0)  # [C, H, W] ou [H, W] se C==1
+
+        if recon.shape[0] == 1:
+            return recon.squeeze(0)  # [H, W]
+        return recon  # [C, H, W]
 
 
 # Mantém compatibilidade com código existente

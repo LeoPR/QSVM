@@ -1,0 +1,33 @@
+repeat,fold,seed,type,params,is_kernel,train_time_s,accuracy,f1_macro,balanced_accuracy
+1,1,42,svm_linear,"{""C"": 1.0}",False,0.0019681999983731657,1.0,1.0,1.0
+1,1,42,svm_rbf,"{""C"": 1.0, ""gamma"": ""scale""}",False,0.0017654000002949033,1.0,1.0,1.0
+1,1,42,hybrid_kernel,"{""n_qubits"": 4, ""C"": 1.0}",True,50.00155099999938,0.94,0.9399759903961584,0.94
+1,1,42,fully_quantum,"{""n_qubits"": 4, ""C"": 1.0}",False,42.964110200000505,0.5,0.3333333333333333,0.5
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""mse"", ""entangler"": ""line""}",False,36.61568499999885,0.42,0.4084047327621379,0.42000000000000004
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""mse"", ""entangler"": ""circular""}",False,36.94996379999975,0.5,0.4949494949494949,0.5
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""mse"", ""entangler"": ""line""}",False,38.05697049999981,0.38,0.3592393551054155,0.38
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""mse"", ""entangler"": ""circular""}",False,39.15586129999974,0.48,0.47665056360708535,0.48000000000000004
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""hinge"", ""entangler"": ""line""}",False,36.47296300000016,0.32,0.31006493506493504,0.32
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""hinge"", ""entangler"": ""circular""}",False,37.22548100000131,0.56,0.5592948717948718,0.56
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""hinge"", ""entangler"": ""line""}",False,37.85985130000154,0.3,0.29292929292929293,0.30000000000000004
+1,1,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""hinge"", ""entangler"": ""circular""}",False,39.03357440000036,0.56,0.56,0.56
+1,1,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""hinge"", ""shots"": 1024}",False,52.07318839999971,0.58,0.5784825371336813,0.5800000000000001
+1,1,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""hinge"", ""shots"": 1024}",False,50.070695800000976,0.54,0.5353535353535354,0.54
+1,1,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""bce"", ""shots"": 1024}",False,52.32408670000041,0.64,0.6305418719211823,0.64
+1,1,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""bce"", ""shots"": 1024}",False,50.09453500000018,0.54,0.5398159263705482,0.54
+1,2,42,svm_linear,"{""C"": 1.0}",False,0.0017883000000438187,1.0,1.0,1.0
+1,2,42,svm_rbf,"{""C"": 1.0, ""gamma"": ""scale""}",False,0.0019286999995529186,1.0,1.0,1.0
+1,2,42,hybrid_kernel,"{""n_qubits"": 4, ""C"": 1.0}",True,49.61446520000027,0.96,0.9599358974358975,0.96
+1,2,42,fully_quantum,"{""n_qubits"": 4, ""C"": 1.0}",False,42.97504320000007,0.5,0.3333333333333333,0.5
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""mse"", ""entangler"": ""line""}",False,36.47227319999911,0.4,0.3961352657004831,0.4
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""mse"", ""entangler"": ""circular""}",False,36.887836899999456,0.44,0.4391025641025641,0.44
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""mse"", ""entangler"": ""line""}",False,37.78908550000051,0.48,0.4663382594417077,0.48
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""mse"", ""entangler"": ""circular""}",False,38.77830990000075,0.48,0.48,0.48
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""hinge"", ""entangler"": ""line""}",False,36.45476149999922,0.38,0.3737373737373737,0.38
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""hinge"", ""entangler"": ""circular""}",False,34.62474840000141,0.54,0.5353535353535354,0.54
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""hinge"", ""entangler"": ""line""}",False,34.7085662999998,0.4,0.3961352657004831,0.4
+1,2,42,var_v6flex,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 80, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""hinge"", ""entangler"": ""circular""}",False,35.5751307999999,0.6,0.5993589743589745,0.6000000000000001
+1,2,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""hinge"", ""shots"": 1024}",False,47.965284100000645,0.46,0.45454545454545453,0.46
+1,2,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""hinge"", ""shots"": 1024}",False,45.74746810000033,0.58,0.5798319327731092,0.5800000000000001
+1,2,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": true, ""loss"": ""bce"", ""shots"": 1024}",False,48.192874099999244,0.58,0.5716034271725826,0.58
+1,2,42,variational_fullyquantum,"{""n_qubits"": 4, ""n_layers"": 2, ""n_epochs"": 100, ""lr"": 0.02, ""use_rx"": false, ""loss"": ""bce"", ""shots"": 1024}",False,45.40021739999975,0.56,0.5592948717948718,0.56
