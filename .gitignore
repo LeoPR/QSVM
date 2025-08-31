@@ -6,4 +6,8 @@
 /cache/models
 /cache/*_res
 /qsvm_figs
-/cache_test
+/cache_*
+/examples
+Figure_1.png
+/.cache_test
+quantized_sample.png
