@@ -6,3 +6,4 @@
 /cache/models
 /cache/*_res
 /qsvm_figs
+/cache_test
