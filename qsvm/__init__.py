@@ -1,5 +1,24 @@
-# Pacote qsvm: exporta modelos principais
-# Mantenha simples: exponha os modelos do subpackage `models`.
-from .models import ClassicalSVM
+# Pacote qsvm: exporta modelos e utilitários no nível do pacote
+from .models import (
+    ClassicalSVM,
+    QuantumKernelSVM,
+    VariationalFullyQuantum,
+    HybridModel,
+    HybridQuantumKernel,
+    FullyQuantumSVM,
+    VariationalQuantumSVM_V6Flex,
+    MultiOutputWrapper,
+)
+from .base import BaseModel
 
-__all__ = ["ClassicalSVM"]
+__all__ = [
+    "BaseModel",
+    "ClassicalSVM",
+    "QuantumKernelSVM",
+    "VariationalFullyQuantum",
+    "HybridModel",
+    "HybridQuantumKernel",
+    "FullyQuantumSVM",
+    "VariationalQuantumSVM_V6Flex",
+    "MultiOutputWrapper",
+]
