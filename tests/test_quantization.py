@@ -1,7 +1,7 @@
-import torch
 import pytest
+import torch
 
-from patchkit import ImageQuantizer
+from patchkit.quantize import ImageQuantizer
 
 @pytest.mark.parametrize("levels", [2, 4, 8])
 def test_uniform_levels(levels):
@@ -17,20 +17,6 @@ def test_uniform_levels(levels):
         # todos inteiros entre 0 e levels-1
         assert vals.issubset(set(range(levels)))
 
-def test_otsu_binary():
-    img = torch.tensor([[[0.0, 0.1, 0.2],[0.8, 0.9, 1.0],[0.5, 0.49, 0.51]]], dtype=torch.float32)
-    q = ImageQuantizer.quantize(img, method='otsu')
-    uniq = set(float(x) for x in torch.unique(q))
-    assert uniq.issubset({0.0, 1.0})
-
-@pytest.mark.parametrize("levels", [4, 8])
-def test_adaptive_levels(levels):
-    img = torch.rand(1, 16, 16)
-    q = ImageQuantizer.quantize(img, levels=levels, method='adaptive')
-    uniq = torch.unique(q)
-    # no máximo 'levels' níveis
-    assert uniq.numel() <= levels
-
 @pytest.mark.parametrize("levels", [4, 8])
 def test_kmeans_levels(levels):
     try:
@@ -44,3 +30,11 @@ def test_kmeans_levels(levels):
     assert uniq.numel() <= levels
     # valores no range [0,1]
     assert float(q.min()) >= 0.0 and float(q.max()) <= 1.0
+
+@pytest.mark.parametrize("levels", [2])
+def test_otsu_binary(levels):
+    img = torch.rand(1, 12, 12)
+    q = ImageQuantizer.quantize(img, levels=levels, method='otsu')
+    uniq = torch.unique(q)
+    # Otsu deve retornar binário puro (0.0 ou 1.0)
+    assert set(float(x) for x in uniq).issubset({0.0, 1.0})

@@ -1,12 +1,6 @@
-"""
-Exemplo de processamento e extração de patches, com salvamento de algumas imagens
-em examples/outputs. Execute via:
-
-  python -m examples.teste_process_data
-"""
-
 import os
 import numpy as np
+import pytest
 from PIL import Image
 
 import torch
@@ -14,9 +8,9 @@ from torchvision import datasets, transforms
 
 from patchkit import ProcessedDataset, OptimizedPatchExtractor
 
-OUT_DIR = os.path.join(os.path.dirname(__file__), "outputs")
-os.makedirs(OUT_DIR, exist_ok=True)
-
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+CACHE_DIR = os.path.join(PROJECT_ROOT, ".cache")
+DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 
 def to_uint8_img(t: torch.Tensor) -> Image.Image:
     if t.dim() == 3 and t.shape[0] in (1, 3):
@@ -30,10 +24,11 @@ def to_uint8_img(t: torch.Tensor) -> Image.Image:
     else:
         raise ValueError(f"Formato de tensor não suportado: {tuple(t.shape)}")
 
-
-def main():
+@pytest.mark.timeout(60)
+def test_processed_dataset_and_patch_extraction():
+    # Baixa MNIST (primeiras 3 imagens)
     transform = transforms.ToTensor()
-    mnist = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    mnist = datasets.MNIST(root=DATA_DIR, train=True, download=True, transform=transform)
     subset = torch.utils.data.Subset(mnist, list(range(3)))
 
     cfg = {
@@ -44,34 +39,22 @@ def main():
         'quantization_levels': 2,
         'quantization_method': 'uniform'
     }
+    pd = ProcessedDataset(subset, cache_dir=CACHE_DIR, cache_rebuild=True, **cfg)
+    # Verifica que as imagens processadas têm o formato esperado
+    assert pd.data.shape[0] == 3
+    assert pd.data.shape[-2:] == (28, 28)
 
-    pd = ProcessedDataset(subset, cache_dir="./cache_example_process", cache_rebuild=True, **cfg)
-
-    # Salvar primeiras 3 imagens processadas como PNG binário
-    for i in range(3):
-        img = to_uint8_img(pd.data[i].squeeze(0))  # [1,H,W] -> PIL L
-        out_path = os.path.join(OUT_DIR, f"processed_bin_{i}.png")
-        img.save(out_path)
-        print(f"[OK] Salvou {out_path}")
-
-    # Extrair patches da primeira imagem e salvar alguns patches
+    # Extrai patches da primeira imagem
     first_img = to_uint8_img(pd.data[0].squeeze(0))
-    # Convertemos de volta pra PIL (já está PIL), configurar extractor
-    extractor = OptimizedPatchExtractor(patch_size=(4, 4), stride=2, cache_dir="./cache_example_process",
-                                       image_size=(28, 28), max_memory_cache=10)
+    extractor = OptimizedPatchExtractor(
+        patch_size=(4, 4), stride=2, cache_dir=CACHE_DIR,
+        image_size=(28, 28), max_memory_cache=10
+    )
     patches = extractor.process(first_img, index=0)
-    # Salvar 12 patches (se existir)
-    for k in range(min(12, patches.shape[0])):
-        p = patches[k]
-        if p.dim() == 2:
-            pil = Image.fromarray(p.numpy(), mode="L")
-        else:
-            pil = Image.fromarray(np.moveaxis(p.numpy(), 0, 2), mode="RGB")
-        pil = pil.resize((32, 32), Image.NEAREST)
-        pil.save(os.path.join(OUT_DIR, f"patch_{k:02d}.png"))
+    # Verifica que extraiu patches > 0 e com shape correto
+    assert patches.shape[1:] == (4, 4)
+    assert patches.shape[0] > 0
+    # Opcional: verifica que patch é imagem binária (0 ou 255)
+    assert np.all(np.isin(patches[0].numpy(), [0, 255]))
 
-    print("[OK] Patches salvos em", OUT_DIR)
-
-
-if __name__ == "__main__":
-    main()
+# Pronto para rodar com pytest!

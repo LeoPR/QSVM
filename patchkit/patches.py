@@ -1,5 +1,6 @@
 import os
 import io
+import tempfile
 import hashlib
 import torch
 import zstandard as zstd
@@ -8,8 +9,29 @@ import torch.nn.functional as F
 from collections import OrderedDict
 from Logger import Logger
 
+def filter_active_patches(patches, min_mean=0.1, max_mean=0.9):
+    """
+    Retorna apenas os patches cuja média está entre min_mean e max_mean.
+    Útil para filtrar patches "ativos" (nem só pretos, nem só brancos).
+    """
+    p = patches.float()
+    if p.max() > 1.0:
+        p = p / 255.0
+    means = p.mean(dim=(-2, -1))
+    if means.dim() > 1:
+        means = means.mean(dim=-1)
+    sel = (means > min_mean) & (means < max_mean)
+    return patches[sel]
+
+
 class OptimizedPatchExtractor:
     def __init__(self, patch_size, stride, cache_dir, image_size, max_memory_cache=100):
+        if cache_dir is None:
+            # respeita variável de ambiente pra facilitar CI/local dev
+            cache_dir = os.environ.get("QSVM_CACHE_DIR",
+                                       os.path.join(tempfile.gettempdir(), "qsvm_cache"))
+        self.cache_dir = os.path.join(cache_dir, "patches_optimized")
+        os.makedirs(self.cache_dir, exist_ok=True)
         self.patch_size = patch_size  # (h,w)
         self.stride = stride
         self.image_size = image_size  # (h,w)
@@ -38,7 +60,7 @@ class OptimizedPatchExtractor:
         tensor = tensor.unsqueeze(0).float()  # [1,C,H,W] in 0-255
         ph, pw = self.patch_size
         patches_unf = F.unfold(tensor, kernel_size=(ph, pw), stride=self.stride)  # [1, C*ph*pw, L]
-        patches_flat = patches_unf.squeeze(0).transpose(0,1)  # [L, C*ph*pw]
+        patches_flat = patches_unf.squeeze(0).transpose(0, 1)  # [L, C*ph*pw]
         patches = patches_flat.view(-1, C, ph, pw)
         patches = patches.round().to(torch.uint8)
         if C == 1:
@@ -135,5 +157,60 @@ class OptimizedPatchExtractor:
                     os.remove(p)
                     invalid += 1
         return invalid
+
+    def reconstruct_image(self, patches, device=torch.device("cpu")):
+        """
+        Reconstruct an image from a set of patches using F.fold (vectorized).
+
+        Accepts:
+            patches: Tensor [L, H, W] (uint8) or [L, C, H, W] (uint8)
+        Returns:
+            - single-channel: Tensor [recon_h, recon_w] uint8
+            - multi-channel: Tensor [C, recon_h, recon_w] uint8
+        """
+        num_h = self.num_patches_h
+        num_w = self.num_patches_w
+        patch_h, patch_w = self.patch_size
+
+        recon_h = patch_h + (num_h - 1) * self.stride
+        recon_w = patch_w + (num_w - 1) * self.stride
+
+        # Detect format of patches and prepare tensor [L, C, ph, pw]
+        if patches.dim() == 3:
+            # [L, H, W] -> [L, 1, H, W]
+            patches_f = patches.unsqueeze(1).float() / 255.0
+        elif patches.dim() == 4:
+            # [L, C, H, W]
+            patches_f = patches.float() / 255.0
+        else:
+            raise ValueError("Unsupported patches shape for reconstruction")
+
+        L, C, ph, pw = patches_f.shape
+        # Move to requested device (CPU by default). fold will sum contributions.
+        patches_f = patches_f.to(device)
+
+        # Prepare for fold: need [1, C*ph*pw, L]
+        patches_flat = patches_f.view(L, -1).transpose(0, 1).unsqueeze(0)  # [1, C*ph*pw, L]
+
+        # Sum contributions (reconstruction) using fold
+        recon_sum = F.fold(patches_flat, output_size=(recon_h, recon_w),
+                           kernel_size=(ph, pw), stride=self.stride)  # [1, C, H, W]
+
+        # Create weight matrix (how many times each pixel was summed) using ones
+        ones = torch.ones_like(patches_f, dtype=patches_f.dtype, device=device)
+        ones_flat = ones.view(L, -1).transpose(0, 1).unsqueeze(0)  # [1, C*ph*pw, L]
+        weight = F.fold(ones_flat, output_size=(recon_h, recon_w),
+                        kernel_size=(ph, pw), stride=self.stride)  # [1, C, H, W]
+
+        # Avoid division by zero
+        recon = recon_sum / weight.clamp(min=1e-6)
+
+        # Convert back to uint8
+        recon = (recon * 255.0).round().to(torch.uint8).squeeze(0)  # [C, H, W] or [H, W] if C==1
+
+        if recon.shape[0] == 1:
+            return recon.squeeze(0)  # [H, W]
+        return recon  # [C, H, W]
+
 
 PatchExtractor = OptimizedPatchExtractor
