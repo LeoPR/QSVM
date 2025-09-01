@@ -1,323 +1,305 @@
 #!/usr/bin/env python3
 """
-QSVM patch dataset test flow (robust quick-mode for patches)
+QSVM_patches.py
 
-- Quick subset garante pelo menos 2 classes e 2 amostras por classe.
-- Para modelos quânticos/variacionais/hybrid reduzimos dimensionalidade via PCA
-  para evitar vetores exponenciais e erros de alocação.
-- Gera "flow" visual: small, large, patch small, patch large, recon small.
-- Salva report.txt, confusion_matrix, predictions.csv, exemplos e imagens de flow.
+Similar flow to QSVM_iris but using MNIST and the local patchkit to produce patches.
+- Loads MNIST (torchvision)
+- Uses patchkit.SuperResPatchDataset + OptimizedPatchExtractor and select_informative_patch
+  to extract paired (small_patch, large_patch) for selected images/classes.
+- Builds feature vectors from small patches (flatten or optionally PCA-reduced)
+- Trains a classical SVM (and reports accuracy) using the same overall "exercise" as QSVM_iris.
+
+Usage examples:
+  # quick random run (picks random images and best patch per image)
+  python QSVM_patches.py --quick --n_samples 40
+
+  # select specific classes and samples per class (deterministic with seed)
+  python QSVM_patches.py --classes 1 8 --n_per_class 10 --seed 0
+
+Notes:
+- Requires the repository's patchkit package (the script imports `patchkit`).
+- ProcessedDataset caches processed images (zstd) in cache_dir; first run may take time.
 """
-import os
-import json
+
 import argparse
-import inspect
-import time
+import os
+import sys
 import numpy as np
-import matplotlib.pyplot as plt
+import torch
+from torchvision import transforms, datasets
 
-from sklearn.decomposition import PCA
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-
+# patchkit imports (from the repository folder)
 try:
-    import qsvm.models as qmodels
+    from patchkit import SuperResPatchDataset, ProcessedDataset, PatchExtractor, select_informative_patch
 except Exception as e:
-    print("ERRO: não foi possível importar qsvm.models:", e)
+    print("Erro ao importar patchkit. Certifique-se de que o diretório do repositório está no PYTHONPATH.")
+    print("Import error:", e)
     raise
 
-SKIP_NAMES = {"MultiOutputWrapper", "BaseModel"}
+# sklearn for training classical models
+try:
+    from sklearn.svm import SVC
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+except Exception as e:
+    print("Falha ao importar scikit-learn. Instale scikit-learn para prosseguir.")
+    raise
 
-def discover_model_classes(module):
-    """
-    Descobre classes exportadas em qsvm.models de forma robusta,
-    usando __all__ quando disponível ou varredura por atributos.
-    """
-    classes = {}
-    if hasattr(module, "__all__") and isinstance(module.__all__, (list, tuple)):
-        for nm in module.__all__:
-            if hasattr(module, nm):
-                attr = getattr(module, nm)
-                if inspect.isclass(attr):
-                    classes[nm] = attr
-    else:
-        for nm in dir(module):
-            if nm.startswith("_"):
-                continue
-            attr = getattr(module, nm)
-            if inspect.isclass(attr) and getattr(attr, "__module__", "").startswith("qsvm"):
-                classes[nm] = attr
-    for s in SKIP_NAMES:
-        classes.pop(s, None)
-    return classes
+from PIL import Image
 
-# == Dummy dataset loader: substitua por seu loader real ==
-def load_patches_dataset(classes=None, n_per_class=2, seed=42):
+def build_superres_dataset(mnist_root, train, cache_dir,
+                           low_size, high_size,
+                           small_patch_size, large_patch_size,
+                           stride, scale_factor,
+                           classes=None, n_per_class=2, n_samples=None,
+                           quick=False, seed=42, max_prefetch=128):
     """
-    Dummy loader for development. Replace with the real loader.
+    Build a dataset of paired patches using patchkit.SuperResPatchDataset.
     Returns:
-      X_small: (N, Hs, Ws)
-      X_large: (N, Hl, Wl)
-      y: (N,)
+      X_small: numpy array (N, Hs, Ws) uint8
+      X_large: numpy array (N, Hl, Wl) uint8
+      y:       numpy array (N,) int labels
+
+    Behavior:
+      - quick=True: sample n_samples random images and pick one informative patch per image.
+      - quick=False: select images by classes (classes list) and n_per_class each.
     """
     rng = np.random.RandomState(seed)
-    all_classes = np.arange(10)
-    selected = classes if classes is not None and len(classes) >= 2 else list(rng.choice(all_classes, 2, replace=False))
-    X_small, X_large, y = [], [], []
-    for cl in selected:
-        for i in range(n_per_class):
-            small = rng.randint(0, 255, (8, 8), dtype=np.uint8)
-            large = rng.randint(0, 255, (32, 32), dtype=np.uint8)
-            X_small.append(small)
-            X_large.append(large)
-            y.append(cl)
-    return np.array(X_small), np.array(X_large), np.array(y)
 
-def extract_patch(img, patch_size, stride, patch_idx):
+    # Load MNIST original dataset (PIL images)
+    original_ds = datasets.MNIST(root=mnist_root, train=train, download=True)
+
+    # Create SuperResPatchDataset which internally creates processed low/high datasets and extractors
+    low_conf = {'target_size': tuple(low_size)}
+    high_conf = {'target_size': tuple(high_size)}
+
+    ds = SuperResPatchDataset(
+        original_ds,
+        low_res_config=low_conf,
+        high_res_config=high_conf,
+        small_patch_size=tuple(small_patch_size),
+        large_patch_size=tuple(large_patch_size),
+        stride=stride,
+        scale_factor=scale_factor,
+        cache_dir=cache_dir,
+        cache_rebuild=False,
+        max_memory_cache=256
+    )
+
+    # helper: convert processed tensor (0..1 float) to uint8 HxW numpy
+    def tensor_to_uint8_img(tensor):
+        t = tensor.detach().cpu()
+        # expected [C,H,W] or [H,W]
+        if t.dim() == 3 and t.shape[0] == 1:
+            t = t.squeeze(0)
+        if t.dim() == 3 and t.shape[0] > 1:
+            # combine channels by mean
+            t = t.mean(dim=0)
+        arr = (t.clamp(0, 1).mul(255.0).round().to(torch.uint8).numpy())
+        return arr
+
+    # Determine which image indices to use
+    num_images = len(ds.low_res_ds)  # same as original_ds
+    labels_all = ds.low_res_ds.labels.numpy()  # tensor of labels
+
+    selected_img_indices = []
+
+    if quick:
+        if n_samples is None:
+            n_samples = 32
+        # sample random image indices
+        selected_img_indices = list(rng.choice(np.arange(num_images), size=min(n_samples, num_images), replace=False))
+    else:
+        # use classes + n_per_class
+        if classes is None or len(classes) == 0:
+            raise ValueError("Quando --quick não for usado, indique --classes X Y ...")
+        for cl in classes:
+            idxs = np.where(labels_all == cl)[0]
+            if len(idxs) == 0:
+                raise ValueError(f"Classe {cl} não encontrada no dataset.")
+            k = min(n_per_class, len(idxs))
+            picks = rng.choice(idxs, size=k, replace=False)
+            selected_img_indices.extend(picks.tolist())
+
+    selected_img_indices = sorted(selected_img_indices)
+
+    X_small = []
+    X_large = []
+    y_list = []
+
+    to_pil = transforms.ToPILImage()
+
+    # If many images, optionally prefetch patches for speed
+    for img_idx in selected_img_indices:
+        # get low/high processed tensors and convert to PIL for patch extractor methods
+        low_tensor = ds.low_res_ds.data[img_idx]
+        high_tensor = ds.high_res_ds.data[img_idx]
+
+        low_pil = to_pil(low_tensor.squeeze())
+        high_pil = to_pil(high_tensor.squeeze())
+
+        # get all small patches (tensor uint8 [L, H, W] or [L,C,H,W])
+        small_patches = ds.small_patch_extractor.process(low_pil, img_idx)
+        large_patches = ds.large_patch_extractor.process(high_pil, img_idx)
+
+        # choose best patch index using select_informative_patch
+        best_idx, scores = select_informative_patch(small_patches, num_candidates=5)
+        # Best patch is small_patches[best_idx], large_patches[best_idx] correspondingly
+
+        small_patch = small_patches[best_idx]
+        large_patch = large_patches[best_idx]
+
+        # convert patches (torch uint8) to numpy HxW uint8
+        # small_patch may be [H,W] or [C,H,W]
+        if isinstance(small_patch, torch.Tensor):
+            sp = small_patch
+            if sp.dim() == 3 and sp.shape[0] == 1:
+                sp = sp.squeeze(0)
+            if sp.dim() == 3 and sp.shape[0] > 1:
+                sp = sp.mean(dim=0)
+            sp_np = sp.cpu().numpy().astype(np.uint8)
+        else:
+            # fallback if patch is PIL
+            sp_np = np.array(small_patch).astype(np.uint8)
+            if sp_np.ndim == 3:
+                sp_np = sp_np.mean(axis=2).astype(np.uint8)
+
+        if isinstance(large_patch, torch.Tensor):
+            lp = large_patch
+            if lp.dim() == 3 and lp.shape[0] == 1:
+                lp = lp.squeeze(0)
+            if lp.dim() == 3 and lp.shape[0] > 1:
+                lp = lp.mean(dim=0)
+            lp_np = lp.cpu().numpy().astype(np.uint8)
+        else:
+            lp_np = np.array(large_patch).astype(np.uint8)
+            if lp_np.ndim == 3:
+                lp_np = lp_np.mean(axis=2).astype(np.uint8)
+
+        X_small.append(sp_np)
+        X_large.append(lp_np)
+        y_list.append(int(labels_all[img_idx]))
+
+    X_small = np.stack(X_small, axis=0)
+    X_large = np.stack(X_large, axis=0)
+    y = np.array(y_list, dtype=int)
+
+    return X_small, X_large, y
+
+
+def flatten_patches(X):
+    # X: (N, H, W) uint8 -> (N, H*W) float64
+    N, H, W = X.shape
+    return X.reshape(N, H * W).astype(np.float32)
+
+
+def train_and_evaluate(X, y, test_size=0.3, pca_components=None, random_state=0):
     """
-    Extrai o patch de índice patch_idx de uma imagem 2D seguindo varredura
-    linha-por-linha com dado stride.
+    Simple classical pipeline:
+      - split
+      - scale
+      - optionally PCA (for quantum alignment or dimensionality reduction)
+      - train SVM (RBF) and report metrics
     """
-    h, w = img.shape
-    patches = []
-    for i in range(0, h - patch_size + 1, stride):
-        for j in range(0, w - patch_size + 1, stride):
-            patches.append(img[i:i+patch_size, j:j+patch_size])
-    if patch_idx < 0 or patch_idx >= len(patches):
-        return None
-    return patches[patch_idx]
+    Xf = flatten_patches(X)
+    X_train, X_test, y_train, y_test = train_test_split(Xf, y, test_size=test_size, stratify=y, random_state=random_state)
 
-def reassemble_from_patches_from_image(img, patch_size, stride):
-    """
-    Reconstrói imagem a partir dos próprios patches da imagem (média nas sobreposições).
-    """
-    h, w = img.shape
-    out = np.zeros((h, w), dtype=float)
-    count = np.zeros((h, w), dtype=float)
-    for i in range(0, h - patch_size + 1, stride):
-        for j in range(0, w - patch_size + 1, stride):
-            out[i:i+patch_size, j:j+patch_size] += img[i:i+patch_size, j:j+patch_size]
-            count[i:i+patch_size, j:j+patch_size] += 1
-    out /= np.maximum(count, 1)
-    return out
+    scaler = StandardScaler()
+    X_train_s = scaler.fit_transform(X_train)
+    X_test_s = scaler.transform(X_test)
 
-def plot_flow(X_small, X_large, y, idx, save_path, patch_idx=None):
-    """
-    Gera figura com: pequena, grande, patch pequeno, patch grande, reconstrução pequena.
-    """
-    small = X_small[idx]
-    large = X_large[idx]
-    label = y[idx]
+    if pca_components is not None and pca_components > 0:
+        pca = PCA(n_components=pca_components, random_state=random_state)
+        X_train_s = pca.fit_transform(X_train_s)
+        X_test_s = pca.transform(X_test_s)
+        print(f"PCA applied: reduced to {pca_components} components")
 
-    hs, ws = small.shape
-    num_patches = (hs - 2 + 1) * (ws - 2 + 1)
-    if patch_idx is None:
-        patch_idx = num_patches // 2
+    clf = SVC(kernel='rbf', gamma='scale', C=1.0, probability=False, random_state=random_state)
+    clf.fit(X_train_s, y_train)
+    y_pred = clf.predict(X_test_s)
 
-    patch_small = extract_patch(small, 2, 1, patch_idx)
-    patch_large = extract_patch(large, 4, 2, patch_idx)
-    recon_small = reassemble_from_patches_from_image(small, 2, 1)
+    acc = accuracy_score(y_test, y_pred)
+    print(f"Test accuracy: {acc:.4f}")
+    print("Classification report:")
+    print(classification_report(y_test, y_pred, zero_division=0))
+    print("Confusion matrix:")
+    print(confusion_matrix(y_test, y_pred))
+    return clf, scaler
 
-    fig, axs = plt.subplots(1, 5, figsize=(14, 3))
-    axs[0].imshow(small, cmap="gray"); axs[0].set_title("Small")
-    axs[1].imshow(large, cmap="gray"); axs[1].set_title("Large")
-    axs[2].imshow(patch_small, cmap="gray"); axs[2].set_title("Patch Small (2x2)")
-    axs[3].imshow(patch_large, cmap="gray"); axs[3].set_title("Patch Large (4x4)")
-    axs[4].imshow(recon_small, cmap="gray"); axs[4].set_title("Recon Small")
-    for ax in axs:
-        ax.axis("off")
-    fig.suptitle(f"Label: {label} - Sample {idx}")
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
 
-def is_quantum_like_model(name_or_cls):
-    nm = name_or_cls if isinstance(name_or_cls, str) else getattr(name_or_cls, "__name__", "").lower()
-    nm = nm.lower()
-    return any(token in nm for token in ("quantum", "variational", "hybrid", "qkernel", "vfq"))
+def parse_args():
+    parser = argparse.ArgumentParser(description="QSVM_patches - MNIST patches pipeline")
+    parser.add_argument("--mnist-root", type=str, default="./data", help="MNIST root directory")
+    parser.add_argument("--cache-dir", type=str, default="./cache", help="cache base directory used by patchkit")
+    parser.add_argument("--quick", action="store_true", help="Quick random sampling flow (no class selection)")
+    parser.add_argument("--n-samples", type=int, default=32, help="when --quick, number of images to sample")
+    parser.add_argument("--classes", type=int, nargs="+", default=None, help="classes to select (when not --quick)")
+    parser.add_argument("--n-per-class", type=int, default=5, help="samples per class when not --quick")
+    parser.add_argument("--seed", type=int, default=42, help="random seed")
+    parser.add_argument("--low-size", type=int, nargs=2, default=[8, 8], help="low res target size H W")
+    parser.add_argument("--high-size", type=int, nargs=2, default=[32, 32], help="high res target size H W")
+    parser.add_argument("--small-patch", type=int, nargs=2, default=[4, 4], help="small patch H W")
+    parser.add_argument("--large-patch", type=int, nargs=2, default=[16, 16], help="large patch H W (should be small*scale)")
+    parser.add_argument("--stride", type=int, default=4, help="patch stride on small image")
+    parser.add_argument("--scale-factor", type=int, default=4, help="scale factor between small and large patches")
+    parser.add_argument("--pca", type=int, default=None, help="apply PCA to reduce dimensionality (optional)")
+    parser.add_argument("--test-size", type=float, default=0.3, help="test fraction")
+    return parser.parse_args()
 
-# sensible defaults per model to keep runs short and stable
-MODEL_INIT_OVERRIDES = {
-    "ClassicalSVM": {"kernel": "linear", "C": 1.0, "probability": True},
-    "QuantumKernelSVM": {"n_qubits": None, "feature_map_layers": 1, "backend": "default.qubit", "svc_kwargs": {"kernel": "precomputed", "C": 1.0}},
-    "VariationalFullyQuantum": {"n_qubits": None, "n_layers": 1, "device_type": "default.qubit", "lr": 0.1, "epochs": 5},
-    "HybridModel": {"n_qubits": None, "backend": "default.qubit"},
-    "HybridQuantumKernel": {"n_qubits": None, "device_type": "default.qubit", "C": 1.0},
-    "FullyQuantumSVM": {"n_qubits": None, "C": 1.0, "device_type": "default.qubit"},
-    "VariationalQuantumSVM_V6Flex": {"n_qubits": None, "n_layers": 1, "device_type": "default.qubit", "lr": 0.05, "use_rx": False, "entangler": "line"},
-}
-
-def remap_binary_if_needed(y_true, y_pred):
-    yt = set(np.unique(y_true).tolist())
-    yp = set(np.unique(y_pred).tolist())
-    if yt <= {0, 1} and yp <= {-1, 1}:
-        y_pred = ((y_pred + 1) // 2).astype(int)
-    elif yt <= {-1, 1} and yp <= {0, 1}:
-        y_pred = (2 * y_pred - 1).astype(int)
-    return y_true, y_pred
 
 def main():
-    parser = argparse.ArgumentParser(description="QSVM patch dataset test flow")
-    parser.add_argument("--outdir", type=str, default="./examples/outputs/patches", help="Diretório de saída")
-    parser.add_argument("--classes", type=int, nargs="*", default=None, help="Classes a usar (ex: 1 8)")
-    parser.add_argument("--n_per_class", type=int, default=2, help="Amostras por classe")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--quick", action="store_true", help="Subset rápido (duas classes, duas amostras)")
-    parser.add_argument("--model", type=str, default=None, help="Modelo específico a rodar")
-    parser.add_argument("--show_flow_samples", type=int, default=2, help="Quantas amostras salvar o flow por modelo")
-    args = parser.parse_args()
+    args = parse_args()
 
-    # Quick = garante 2 classes e 2 amostras
+    print("Construindo dataset de patches usando patchkit (pode demorar na primeira execução, cache será criado).")
     if args.quick:
-        args.n_per_class = 2
-        args.classes = None  # aleatório escolhido pelo loader
+        Xs, Xl, y = build_superres_dataset(
+            mnist_root=args.mnist_root,
+            train=True,
+            cache_dir=args.cache_dir,
+            low_size=args.low_size,
+            high_size=args.high_size,
+            small_patch_size=args.small_patch,
+            large_patch_size=args.large_patch,
+            stride=args.stride,
+            scale_factor=args.scale_factor,
+            quick=True,
+            n_samples=args.n_samples,
+            seed=args.seed
+        )
+    else:
+        Xs, Xl, y = build_superres_dataset(
+            mnist_root=args.mnist_root,
+            train=True,
+            cache_dir=args.cache_dir,
+            low_size=args.low_size,
+            high_size=args.high_size,
+            small_patch_size=args.small_patch,
+            large_patch_size=args.large_patch,
+            stride=args.stride,
+            scale_factor=args.scale_factor,
+            quick=False,
+            classes=args.classes,
+            n_per_class=args.n_per_class,
+            seed=args.seed
+        )
 
-    # Carrega dataset (troque pelo loader real)
-    X_small, X_large, y = load_patches_dataset(classes=args.classes, n_per_class=args.n_per_class, seed=args.seed)
-    if len(X_small) == 0:
-        print("Dataset vazio. Cheque o loader.")
-        return
+    print(f"Dataset criado: {Xs.shape[0]} samples; small patch shape {Xs.shape[1:]} ; large patch shape {Xl.shape[1:]}")
+    print("Treinando classificador clássico (SVM RBF) usando patches pequenos (flatten).")
 
-    # Flatten small images para alimentar modelos clássicos -> (N, Hs*Ws)
-    X_flat = X_small.reshape(len(X_small), -1)
-    y = np.array(y)
+    clf, scaler = train_and_evaluate(Xs, y, test_size=args.test_size, pca_components=args.pca, random_state=args.seed)
 
-    # Saída
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    out_base = os.path.join(args.outdir, timestamp)
-    os.makedirs(out_base, exist_ok=True)
-
-    classes_mod = discover_model_classes(qmodels)
-    to_run = [args.model] if args.model else list(classes_mod.keys())
-    print(f"Rodando modelos: {to_run}")
-
-    results = []
-    for name in to_run:
-        print(f"\n==> Testando modelo: {name}")
-        cls = classes_mod.get(name)
-        if cls is None:
-            print(f"[WARN] Modelo {name} não encontrado em qsvm.models, pulando.")
-            continue
-        model_out = os.path.join(out_base, name)
-        os.makedirs(model_out, exist_ok=True)
-
-        # Decide features to feed model: reduce for quantum-like models
-        X_for_model = X_flat.copy()
-        pca_obj = None
-        if is_quantum_like_model(name):
-            # choose small number of components safe for pennylane/backends
-            max_q = min(4, X_flat.shape[1])
-            if max_q < 1:
-                max_q = 1
-            try:
-                pca_obj = PCA(n_components=max_q, random_state=args.seed)
-                X_for_model = pca_obj.fit_transform(X_flat)
-                print(f"  -> {name}: usando PCA -> {max_q} componentes para modelos quânticos.")
-            except Exception as e:
-                print(f"  -> Aviso PCA falhou para {name}: {e}; usando features originais (cuidado com tamanho).")
-
-        # Instantiate with safe overrides
-        overrides = dict(MODEL_INIT_OVERRIDES.get(name, {}))
-        # If override n_qubits is None, set to features count used
-        if "n_qubits" in overrides and overrides["n_qubits"] is None:
-            overrides["n_qubits"] = max(1, min(6, X_for_model.shape[1]))  # cap to avoid huge circuits
-
-        try:
-            # Try instantiating with overrides, fallback to default constructor
-            try:
-                model = cls(**overrides)
-            except TypeError:
-                model = cls()
-        except Exception as e:
-            print(f"[ERROR] Falha ao instanciar {name}: {e}")
-            results.append({"model": name, "status": "fail_instantiate", "accuracy": None, "error": str(e)})
-            continue
-
-        t0 = time.time()
-        try:
-            # Fit/predict on small dataset (quick). Use X_for_model for training.
-            model.fit(X_for_model, y)
-            y_pred = model.predict(X_for_model)
-            # If we used PCA, predictions map to same labels (no inverse transform needed)
-            y_true, y_pred = remap_binary_if_needed(y, np.asarray(y_pred))
-
-            # Warning about missing predicted classes
-            unique_pred = np.unique(y_pred)
-            unique_true = np.unique(y_true)
-            missing_pred = set(unique_true) - set(unique_pred)
-            if missing_pred:
-                print(f"[WARN] {name}: predicted classes {sorted(unique_pred)} but true classes {sorted(unique_true)}; missing predictions for classes {sorted(missing_pred)}")
-
-            acc = float(accuracy_score(y_true, y_pred))
-            cm = confusion_matrix(y_true, y_pred)
-            report = classification_report(y_true, y_pred, zero_division=0)
-
-            with open(os.path.join(model_out, "report.txt"), "w", encoding="utf-8") as f:
-                f.write(f"Model: {name}\n")
-                f.write(f"Accuracy: {acc:.6f}\n\n")
-                f.write("Confusion Matrix:\n")
-                f.write(str(cm) + "\n\n")
-                f.write(report)
-            np.savetxt(os.path.join(model_out, "confusion_matrix.csv"), cm, fmt="%d", delimiter=",")
-            np.save(os.path.join(model_out, "confusion_matrix.npy"), cm)
-
-            # Save predictions.csv (features = flattened small)
-            header = ["row", "y_true", "y_pred"] + [f"f{i}" for i in range(X_flat.shape[1])]
-            rows = np.column_stack([np.arange(len(y_true)), y_true, y_pred, X_flat])
-            np.savetxt(os.path.join(model_out, "predictions.csv"), rows, delimiter=",", fmt="%.10g", header=",".join(header), comments="")
-
-            # Samples correct / wrong
-            correct_idx = np.where(y_true == y_pred)[0]
-            wrong_idx = np.where(y_true != y_pred)[0]
-            def save_subset(idxs, fname):
-                k = min(2, len(idxs))
-                if k == 0: return
-                sel = idxs[:k]
-                sub = np.column_stack([sel, y_true[sel], y_pred[sel], X_flat[sel]])
-                np.savetxt(os.path.join(model_out, fname), sub, delimiter=",", fmt="%.10g",
-                           header="row,y_true,y_pred," + ",".join([f"f{i}" for i in range(X_flat.shape[1])]), comments="")
-            save_subset(correct_idx, "examples_correct_sample.csv")
-            save_subset(wrong_idx, "examples_wrong_sample.csv")
-
-            # Flow images: save first N flows
-            n_flow = min(args.show_flow_samples, len(X_small))
-            for i in range(n_flow):
-                flow_path = os.path.join(model_out, f"flow_sample_{i}.png")
-                plot_flow(X_small, X_large, y, i, flow_path)
-
-            results.append({"model": name, "status": "ok", "accuracy": acc, "error": None, "time_s": time.time()-t0})
-            print(f"  -> {name} status=ok acc={acc:.4f} time={time.time()-t0:.2f}s")
-        except Exception as e:
-            print(f"[ERROR] Runtime for {name}: {e}")
-            results.append({"model": name, "status": "fail_runtime", "accuracy": None, "error": str(e), "time_s": time.time()-t0})
-            continue
-
-    # CSV/JSON summary and accuracy plot
-    csv_path = os.path.join(out_base, "summary.csv")
-    with open(csv_path, "w", encoding="utf-8") as cf:
-        cf.write("model,status,accuracy,time_s,error\n")
-        for r in results:
-            cf.write(f"{r['model']},{r['status']},{r.get('accuracy','')},{r.get('time_s','')},{r.get('error','')}\n")
-    with open(os.path.join(out_base, "summary.json"), "w", encoding="utf-8") as jf:
-        json.dump(results, jf, indent=2, ensure_ascii=False)
-
-    labels = [r["model"] for r in results]
-    accs = [r["accuracy"] if r["status"] == "ok" and r["accuracy"] is not None else 0.0 for r in results]
-    colors = ["tab:blue" if r["status"] == "ok" and r["accuracy"] is not None else "tab:red" for r in results]
-    plt.figure(figsize=(max(6, len(labels)*0.8), 4))
-    x = np.arange(len(labels))
-    plt.bar(x, accs, color=colors)
-    plt.xticks(x, labels, rotation=45, ha="right")
-    plt.ylim(0, 1.0)
-    plt.ylabel("Accuracy (or 0 if skipped/failed)")
-    plt.title("qsvm.models PATCHES test results")
-    plt.tight_layout()
-    plot_path = os.path.join(out_base, "models_accuracy.png")
-    plt.savefig(plot_path, dpi=150)
-    plt.close()
-
-    print(f"\nResumo salvo em: {out_base}")
-    print(f" - CSV: {csv_path}")
-    print(f" - Plot: {plot_path}")
+    print("Pronto. Você pode usar 'clf' e 'scaler' salvos para previsões ou adaptar para o pipeline QSVM/quantum.")
+    # Optionally save model artifacts
+    try:
+        import joblib
+        out_dir = "./models_patches"
+        os.makedirs(out_dir, exist_ok=True)
+        joblib.dump({'clf': clf, 'scaler': scaler}, os.path.join(out_dir, "svm_patches.joblib"))
+        print(f"Modelo salvo em {out_dir}/svm_patches.joblib")
+    except Exception:
+        print("joblib não disponível; pulando salvamento do modelo.")
 
 if __name__ == "__main__":
     main()
