@@ -300,6 +300,7 @@ class TestProcessedDatasetWithRealData:
 
     def test_mnist_basic_processing(self, cache_dir, project_dirs):
         """Testa processamento básico do MNIST real"""
+
         # Usar subset muito pequeno para não demorar
         transform = transforms.ToTensor()
         full_mnist = datasets.MNIST(

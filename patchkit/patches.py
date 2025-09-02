@@ -125,6 +125,12 @@ class OptimizedPatchExtractor:
         return patches
 
     def get_patch(self, image, index, patch_idx):
+
+        if patch_idx < 0:
+            raise IndexError(f"Patch index {patch_idx} cannot be negative")
+        if patch_idx >= self.num_patches_per_image:
+            raise IndexError(f"Patch index {patch_idx} out of bounds (max: {self.num_patches_per_image - 1})")
+
         all_patches = self.process(image, index)
         return all_patches[patch_idx]
 

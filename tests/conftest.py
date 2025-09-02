@@ -1,6 +1,24 @@
 import shutil
 import pytest
 import torch
+from pathlib import Path
+
+@pytest.fixture(scope="session")
+def project_dirs():
+    """
+    Cria e garante que os diretórios padrão do projeto existem.
+    Útil para testes de integração que precisam dos caminhos reais.
+    """
+    dirs = {
+        'data': Path(".data"),
+        'cache': Path(".cache"),
+        'output': Path("outputs")
+    }
+
+    for dir_path in dirs.values():
+        dir_path.mkdir(exist_ok=True)
+
+    return dirs
 
 @pytest.fixture
 def cache_dir(tmp_path):

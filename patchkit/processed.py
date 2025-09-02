@@ -18,6 +18,16 @@ class ProcessedDataset(torch.utils.data.Dataset):
                  image_format=None, quality=None,
                  quantization_levels=None, quantization_method='uniform',
                  cache_dir="./cache", cache_rebuild=False):
+        if target_size is not None:
+            if not isinstance(target_size, (tuple, list)) or len(target_size) != 2:
+                raise ValueError(f"target_size must be (height, width), got {target_size}")
+            h, w = target_size
+            if h <= 0 or w <= 0:
+                raise ValueError(f"target_size must have positive dimensions, got {target_size}")
+
+        if quantization_levels is not None and quantization_levels < 2:
+            raise ValueError(f"quantization_levels must be >= 2, got {quantization_levels}")
+
         self.original_ds = original_ds
         self.target_size = target_size
         self.resize_alg = resize_alg

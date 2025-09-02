@@ -412,19 +412,30 @@ class TestPatchExtractionUtilities:
         torch.testing.assert_close(patches1, patches2)
         assert extractor.cache_hits == 0  # Nenhum cache hit
 
-    def test_processing_multiple_images_efficiently(self, sample_pil_images, cache_dir):
-        """Testa processamento eficiente de múltiplas imagens"""
+    def test_processing_multiple_images_efficiently(self, cache_dir):
+        """Testa processamento eficiente de múltiplas imagens do MESMO tamanho"""
         extractor = OptimizedPatchExtractor(
             patch_size=(4, 4), stride=2,
             cache_dir=cache_dir, image_size=(28, 28),
             max_memory_cache=10
         )
 
-        images = list(sample_pil_images.values())
+        # Usar apenas imagens do mesmo tamanho (28x28)
+        from PIL import Image
+        import numpy as np
+
+        same_size_images = []
+        for i in range(4):
+            # Criar imagens 28x28 com padrões diferentes
+            if i % 2 == 0:
+                arr = np.tile(np.linspace(0, 255, 28, dtype=np.uint8), (28, 1))
+            else:
+                arr = np.tile(np.linspace(0, 255, 28, dtype=np.uint8).reshape(28, 1), (1, 28))
+            same_size_images.append(Image.fromarray(arr, mode='L'))
 
         # Processar todas as imagens
         all_patches = []
-        for i, img in enumerate(images):
+        for i, img in enumerate(same_size_images):
             patches = extractor.process(img, index=i)
             all_patches.append(patches)
 
