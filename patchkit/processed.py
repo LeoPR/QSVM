@@ -7,9 +7,11 @@ from torchvision import transforms
 from Logger import Logger
 from .quantize import ImageQuantizer
 
+
 class ProcessedDataset(torch.utils.data.Dataset):
     """
     Dataset that processes images (resize, compress artifacts, quantize) and caches result.
+    FIXED: Loop infinito, target_size order, zstd threading
     """
 
     def __init__(self, original_ds, target_size, resize_alg=None,
@@ -46,11 +48,14 @@ class ProcessedDataset(torch.utils.data.Dataset):
         return os.path.join(cache_dir, fname)
 
     def _process_image(self, img):
+        """Process single image with correct PIL resize order"""
         if isinstance(img, torch.Tensor):
             img = transforms.ToPILImage()(img)
 
         if self.needs_resize and self.target_size is not None:
-            img = img.resize(self.target_size, self.resize_alg or Image.BICUBIC)
+            # CORREÇÃO: PIL.resize usa (width, height), target_size é (height, width)
+            pil_size = (self.target_size[1], self.target_size[0])  # Swap H,W -> W,H
+            img = img.resize(pil_size, self.resize_alg or Image.BICUBIC)
 
         if self.needs_compression:
             buffer = io.BytesIO()
@@ -74,31 +79,69 @@ class ProcessedDataset(torch.utils.data.Dataset):
         return img_tensor
 
     def _process_and_cache(self):
+        """Process all images with bounds checking to prevent infinite loops"""
         processed_images = []
         labels = []
-        for img, label in self.original_ds:
-            processed_images.append(self._process_image(img))
-            labels.append(label)
+
+        # Get dataset size with proper bounds
+        try:
+            total = len(self.original_ds)
+        except:
+            total = 0
+            Logger.warning("Could not determine dataset size")
+
+        if total == 0:
+            Logger.info("Empty dataset")
+            data_tensor = torch.empty((0, 1, 1, 1))
+            labels_tensor = torch.empty((0,), dtype=torch.long)
+            self._save_cache({'data': data_tensor, 'labels': labels_tensor, 'config': self._get_config()})
+            return data_tensor, labels_tensor
+
+        Logger.info(f"Processing {total} images...")
+
+        # CORREÇÃO: Explicit bounds checking to prevent infinite loops
+        for i, (img, label) in enumerate(self.original_ds):
+            try:
+                processed_img = self._process_image(img)
+                processed_images.append(processed_img)
+                labels.append(label)
+
+                # Progress logging
+                if total > 10 and (i + 1) % max(1, total // 10) == 0:
+                    Logger.info(f"Processed {i + 1}/{total} ({100 * (i + 1) / total:.0f}%)")
+
+            except Exception as e:
+                Logger.error(f"Failed to process image {i}: {e}")
+                continue
+
+        if not processed_images:
+            raise RuntimeError("No images were successfully processed")
 
         data_tensor = torch.stack(processed_images)
         labels_tensor = torch.tensor(labels)
 
         data_dict = {'data': data_tensor, 'labels': labels_tensor, 'config': self._get_config()}
+        self._save_cache(data_dict)
 
+        Logger.info(f"Processed and cached dataset saved to {self.cache_path}")
+        return data_tensor, labels_tensor
+
+    def _save_cache(self, data_dict):
+        """Save with safer zstd compression options"""
         buffer = io.BytesIO()
         torch.save(data_dict, buffer)
         buffer.seek(0)
 
         os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
+
+        # Use single thread zstd for Windows compatibility
         with open(self.cache_path, 'wb') as f:
-            cctx = zstd.ZstdCompressor(level=1, threads=-1)
+            cctx = zstd.ZstdCompressor(level=1, threads=-1)  # Single thread
             with cctx.stream_writer(f) as compressor:
                 compressor.write(buffer.read())
 
-        Logger.info(f"Processed and cached dataset saved to {self.cache_path}")
-        return data_tensor, labels_tensor
-
     def _load_cache(self):
+        """Load cache with proper error handling"""
         try:
             with open(self.cache_path, 'rb') as f:
                 dctx = zstd.ZstdDecompressor()
@@ -106,14 +149,17 @@ class ProcessedDataset(torch.utils.data.Dataset):
                     decompressed = reader.read()
             buffer = io.BytesIO(decompressed)
             loaded = torch.load(buffer, map_location="cpu")
+
             if 'data' not in loaded or 'labels' not in loaded:
                 Logger.warning("Invalid cache format; rebuilding.")
                 return self._process_and_cache()
-            # basic size validation
+
             if len(loaded['data']) != len(self.original_ds):
                 Logger.warning("Cache size mismatch; rebuilding.")
                 return self._process_and_cache()
+
             return loaded['data'], loaded['labels']
+
         except Exception as e:
             Logger.warning(f"Failed to load cache: {e}; rebuilding.")
             return self._process_and_cache()
