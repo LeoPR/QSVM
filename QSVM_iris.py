@@ -153,7 +153,7 @@ def main():
             elif name == "QuantumKernelSVM":
                 model = cls(n_qubits=X_train.shape[1], feature_map_layers=1, backend="default.qubit")
             elif name == "VariationalFullyQuantum":
-                model = cls(n_qubits=X_train.shape[1], n_layers=1, device_type="default.qubit", lr=0.2, epochs=5)
+                model = cls(n_qubits=min(4, X_train.shape[1]), n_layers=1, device_type="default.qubit", lr=0.1, epochs=20)
             elif name == "HybridModel":
                 model = cls(n_qubits=X_train.shape[1], backend="default.qubit")
             elif name == "HybridQuantumKernel":
@@ -161,7 +161,7 @@ def main():
             elif name == "FullyQuantumSVM":
                 model = cls(n_qubits=X_train.shape[1], C=1.0, device_type="default.qubit")
             elif name == "VariationalQuantumSVM_V6Flex":
-                model = cls(n_qubits=X_train.shape[1], n_layers=1, device_type="default.qubit", lr=0.05, entangler="line")
+                model = cls(n_qubits=min(4, X_train.shape[1]), n_layers=1, device_type="default.qubit", lr=0.01, entangler="line")
             else:
                 model = cls()
         except Exception as e:
