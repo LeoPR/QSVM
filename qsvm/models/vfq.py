@@ -320,10 +320,10 @@ class VariationalFullyQuantum_Ultra:
 
                 # Processa predições baseado no tipo de medição
                 if isinstance(pred, list):
-                    pred = np.mean(pred)  # Simplificado
+                    pred = np.mean(pred)  # Simplificado, média parece uma boa
 
                 # Loss
-                target = 2 * y_sample - 1  # Mapeia 0,1 para -1,1
+                target = 2 * y_sample - 1  # Mapeia 0,1 para -1,1 ; talvez de pra melhorar esse range pra algo mais "quântico"
                 loss = (pred - target) ** 2
                 total_loss += loss
 
@@ -349,7 +349,7 @@ class VariationalFullyQuantum_Ultra:
         return self
 
     def predict(self, X):
-        """Predição com circuito ultra-quântico"""
+        """Predição com circuito quântico"""
         X = np.asarray(X)
         predictions = []
 
