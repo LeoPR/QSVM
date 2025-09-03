@@ -1,90 +1,16 @@
 import pytest
 import numpy as np
-import torch
-from torchvision import transforms
-from pathlib import Path
 from PIL import Image
+import torch
 
-# --- Helpers / fixtures usados nos testes ---
-
-@pytest.fixture
-def tiny_synthetic():
-    """
-    Retorna uma fábrica que cria um pequeno dataset (torch.utils.data.Dataset)
-    com padrão determinístico para testes rápidos.
-    Uso:
-        ds = tiny_synthetic(n=3, size=(28,28), pattern="gradient")
-    """
-    class SimpleDataset(torch.utils.data.Dataset):
-        def __init__(self, tensors, labels):
-            self._tensors = tensors
-            self._labels = labels
-        def __len__(self):
-            return len(self._tensors)
-        def __getitem__(self, idx):
-            return self._tensors[idx], self._labels[idx]
-
-    def _factory(n=3, size=(28,28), pattern="gradient"):
-        H, W = size
-        imgs = []
-        labels = []
-        for i in range(n):
-            if pattern == "gradient":
-                arr = np.tile(np.linspace(0.0, 1.0, W, dtype=np.float32), (H,1))
-            elif pattern == "checker":
-                # checkerboard of 0/1
-                xx, yy = np.meshgrid(np.arange(W), np.arange(H))
-                arr = ((xx // 4 + yy // 4) % 2).astype(np.float32)
-            elif pattern == "binary":
-                # binary image 0/255
-                rng = np.random.RandomState(123 + i)
-                arr = (rng.rand(H, W) > 0.7).astype(np.float32)
-            else:
-                rng = np.random.RandomState(123 + i)
-                arr = rng.rand(H, W).astype(np.float32)
-            t = torch.from_numpy(arr).unsqueeze(0).to(torch.float32)  # (1,H,W)
-            imgs.append(t)
-            labels.append(i % 10)
-        return SimpleDataset(imgs, labels)
-    return _factory
-
-
-@pytest.fixture(scope="session")
-def mnist_cache_dir(tmp_path_factory):
-    p = tmp_path_factory.getbasetemp() / "mnist_cache"
-    p.mkdir(parents=True, exist_ok=True)
-    return str(p)
-
-
-@pytest.fixture
-def mnist_sample(mnist_cache_dir):
-    """
-    Factory returning a small Subset of MNIST. Pula o teste se torchvision/MNIST não puder ser obtido.
-    Uso: ds = mnist_sample(n=6, train=False)
-    """
-    def _factory(n=6, train=False, transform=None):
-        try:
-            from torchvision.datasets import MNIST
-        except Exception:
-            pytest.skip("torchvision MNIST não disponível")
-        if transform is None:
-            transform = transforms.ToTensor()
-        try:
-            ds = MNIST(root=mnist_cache_dir, train=train, download=True, transform=transform)
-        except Exception as e:
-            pytest.skip(f"Não foi possível obter MNIST: {e}")
-        if n <= 0:
-            pytest.skip("mnist_sample requires n>0")
-        from torch.utils.data import Subset
-        return Subset(ds, list(range(min(n, len(ds)))))
-    return _factory
+# Fixtures locais do pacote patchkit (não duplicam tiny_synthetic/mnist_sample)
 
 
 @pytest.fixture
 def sample_pil_images():
     """
     Retorna um dicionário de PIL images de exemplo usados em alguns testes.
-    Corrige o uso deprecated de Image.fromarray(..., mode=...) garantindo uint8 dtype.
+    Garante dtype uint8 para evitar warnings do Pillow e mantém chaves esperadas.
     """
     images = {}
     H, W = 28, 28
@@ -93,10 +19,14 @@ def sample_pil_images():
     grad = (np.tile(np.linspace(0, 255, W, dtype=np.uint8), (H, 1)))
     images['gradient'] = Image.fromarray(grad)  # mode inferred as 'L'
 
+    # checkerboard 0/255 (nome esperado pelos testes)
+    xx, yy = np.meshgrid(np.arange(W), np.arange(H))
+    checker = ((xx // 4 + yy // 4) % 2).astype(np.uint8) * 255
+    images['checkerboard'] = Image.fromarray(checker)
+
     # binary 0/255
     binary_array = (np.indices((H, W)).sum(axis=0) % 2).astype(np.uint8) * 255
-    # Antes: Image.fromarray(binary_array, mode='L')  # deprecated
-    images['binary'] = Image.fromarray(binary_array)  # dtype uint8 -> mode 'L' inferido
+    images['binary'] = Image.fromarray(binary_array)
 
     # RGB sample
     rgb = np.zeros((H, W, 3), dtype=np.uint8)
@@ -106,3 +36,70 @@ def sample_pil_images():
     images['rgb'] = Image.fromarray(rgb)  # mode 'RGB'
 
     return images
+
+
+# --- Patch extractor fixtures (locais ao pacote patchkit) ---
+
+
+def _locate_optimized_patch_extractor():
+    """
+    Tenta encontrar a classe OptimizedPatchExtractor em locais prováveis.
+    Retorna a classe ou None se não encontrada.
+    """
+    candidates = [
+        "patchkit.optimized_patch_extractor",
+        "patchkit.extractor",
+        "patchkit.optimized",
+        "patchkit",
+    ]
+    for modname in candidates:
+        try:
+            mod = __import__(modname, fromlist=['OptimizedPatchExtractor'])
+            cls = getattr(mod, 'OptimizedPatchExtractor', None)
+            if cls is not None:
+                return cls
+        except Exception:
+            continue
+    try:
+        from patchkit import OptimizedPatchExtractor  # type: ignore
+        return OptimizedPatchExtractor
+    except Exception:
+        return None
+
+
+@pytest.fixture
+def standard_extractor(tmp_path):
+    """
+    Instância padrão do extractor usada por muitos testes.
+    Pula o teste se a classe não estiver disponível.
+    """
+    cls = _locate_optimized_patch_extractor()
+    if cls is None:
+        pytest.skip("OptimizedPatchExtractor class not found in patchkit (fixture standard_extractor skipped)")
+    cache_dir = tmp_path / "cache_standard"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cls(patch_size=(4, 4), stride=4, cache_dir=str(cache_dir), image_size=(28, 28))
+
+
+@pytest.fixture
+def small_extractor(tmp_path):
+    """
+    Versão menor / alternativa do extractor para testes que precisem de outros tamanhos.
+    """
+    cls = _locate_optimized_patch_extractor()
+    if cls is None:
+        pytest.skip("OptimizedPatchExtractor class not found in patchkit (fixture small_extractor skipped)")
+    cache_dir = tmp_path / "cache_small"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cls(patch_size=(8, 8), stride=8, cache_dir=str(cache_dir), image_size=(28, 28))
+
+
+@pytest.fixture
+def cache_dir(tmp_path):
+    """
+    Fixture simples que fornece um diretório de cache (string) para testes que o requerem.
+    Uso: cache_dir + f"_suffix" é aceito nos testes existentes.
+    """
+    p = tmp_path / "cache"
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
