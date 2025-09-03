@@ -9,7 +9,11 @@ from PIL import Image
 from pathlib import Path
 
 from patchkit import OptimizedPatchExtractor
-
+try:
+    from .image_utils import to_pil
+except Exception:
+    # fallback caso os testes não sejam executados como pacote
+    from tests.patchkit.image_utils import to_pil
 
 class TestPatchExtractionBasic:
     """Testes básicos de extração de patches"""
@@ -208,7 +212,7 @@ class TestPatchReconstruction:
         """Testa reconstrução perfeita sem overlapping (stride = patch_size)"""
         # Imagem 8x8, patches 4x4, stride 4 -> sem overlap
         img_array = np.tile(np.arange(8, dtype=np.uint8), (8, 1))  # gradiente horizontal
-        img = Image.fromarray(img_array, mode='L')
+        img = to_pil(img_array, mode='L')
 
         extractor = OptimizedPatchExtractor(
             patch_size=(4, 4), stride=4,
@@ -262,7 +266,7 @@ class TestPatchReconstruction:
         """Testa reconstrução com imagens RGB (multicanal)"""
         # Criar imagem RGB sintética
         rgb_array = np.random.randint(0, 256, (16, 16, 3), dtype=np.uint8)
-        rgb_img = Image.fromarray(rgb_array, mode='RGB')
+        rgb_img = to_pil(rgb_array, mode='RGB')
 
         extractor = OptimizedPatchExtractor(
             patch_size=(4, 4), stride=4,  # Sem overlap para reconstrução mais precisa
@@ -282,7 +286,7 @@ class TestPatchExtractionEdgeCases:
     def test_stride_larger_than_patch(self, cache_dir):
         """Testa stride maior que patch size (gaps na reconstrução)"""
         img_array = np.full((16, 16), 128, dtype=np.uint8)  # Imagem uniforme
-        img = Image.fromarray(img_array, mode='L')
+        img = to_pil(img_array, mode='L')
 
         extractor = OptimizedPatchExtractor(
             patch_size=(4, 4), stride=8,  # stride > patch_size
@@ -298,7 +302,7 @@ class TestPatchExtractionEdgeCases:
     def test_patch_larger_than_image_fails(self, cache_dir):
         """Testa que patch maior que imagem falha adequadamente"""
         img_array = np.zeros((4, 4), dtype=np.uint8)
-        img = Image.fromarray(img_array, mode='L')
+        img = to_pil(img_array, mode='L')
 
         extractor = OptimizedPatchExtractor(
             patch_size=(8, 8), stride=1,  # patch > image
@@ -317,7 +321,7 @@ class TestPatchExtractionEdgeCases:
     def test_very_small_image(self, cache_dir):
         """Testa imagem muito pequena"""
         img_array = np.array([[255]], dtype=np.uint8)  # 1x1 pixel
-        img = Image.fromarray(img_array, mode='L')
+        img = to_pil(img_array, mode='L')
 
         extractor = OptimizedPatchExtractor(
             patch_size=(1, 1), stride=1,
@@ -333,7 +337,7 @@ class TestPatchExtractionEdgeCases:
         """Testa patches e imagens não-quadradas"""
         # Imagem retangular
         img_array = np.random.randint(0, 256, (12, 20), dtype=np.uint8)
-        img = Image.fromarray(img_array, mode='L')
+        img = to_pil(img_array, mode='L')
 
         # Patches retangulares
         extractor = OptimizedPatchExtractor(
@@ -431,7 +435,7 @@ class TestPatchExtractionUtilities:
                 arr = np.tile(np.linspace(0, 255, 28, dtype=np.uint8), (28, 1))
             else:
                 arr = np.tile(np.linspace(0, 255, 28, dtype=np.uint8).reshape(28, 1), (1, 28))
-            same_size_images.append(Image.fromarray(arr, mode='L'))
+            same_size_images.append(to_pil(arr, mode='L'))
 
         # Processar todas as imagens
         all_patches = []
