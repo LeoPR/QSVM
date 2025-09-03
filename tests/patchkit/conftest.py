@@ -1,227 +1,108 @@
-"""
-Fixtures específicas para testes do patchkit
-"""
 import pytest
-import torch
-from PIL import Image
 import numpy as np
+import torch
+from torchvision import transforms
+from pathlib import Path
+from PIL import Image
 
-from patchkit import OptimizedPatchExtractor, ProcessedDataset, SuperResPatchDataset
+# --- Helpers / fixtures usados nos testes ---
+
+@pytest.fixture
+def tiny_synthetic():
+    """
+    Retorna uma fábrica que cria um pequeno dataset (torch.utils.data.Dataset)
+    com padrão determinístico para testes rápidos.
+    Uso:
+        ds = tiny_synthetic(n=3, size=(28,28), pattern="gradient")
+    """
+    class SimpleDataset(torch.utils.data.Dataset):
+        def __init__(self, tensors, labels):
+            self._tensors = tensors
+            self._labels = labels
+        def __len__(self):
+            return len(self._tensors)
+        def __getitem__(self, idx):
+            return self._tensors[idx], self._labels[idx]
+
+    def _factory(n=3, size=(28,28), pattern="gradient"):
+        H, W = size
+        imgs = []
+        labels = []
+        for i in range(n):
+            if pattern == "gradient":
+                arr = np.tile(np.linspace(0.0, 1.0, W, dtype=np.float32), (H,1))
+            elif pattern == "checker":
+                # checkerboard of 0/1
+                xx, yy = np.meshgrid(np.arange(W), np.arange(H))
+                arr = ((xx // 4 + yy // 4) % 2).astype(np.float32)
+            elif pattern == "binary":
+                # binary image 0/255
+                rng = np.random.RandomState(123 + i)
+                arr = (rng.rand(H, W) > 0.7).astype(np.float32)
+            else:
+                rng = np.random.RandomState(123 + i)
+                arr = rng.rand(H, W).astype(np.float32)
+            t = torch.from_numpy(arr).unsqueeze(0).to(torch.float32)  # (1,H,W)
+            imgs.append(t)
+            labels.append(i % 10)
+        return SimpleDataset(imgs, labels)
+    return _factory
+
+
+@pytest.fixture(scope="session")
+def mnist_cache_dir(tmp_path_factory):
+    p = tmp_path_factory.getbasetemp() / "mnist_cache"
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
 
 
 @pytest.fixture
-def standard_extractor(cache_dir):
+def mnist_sample(mnist_cache_dir):
     """
-    Extractor padrão para a maioria dos testes.
-    Configuração comum: patches 4x4, stride 2, imagem 28x28
+    Factory returning a small Subset of MNIST. Pula o teste se torchvision/MNIST não puder ser obtido.
+    Uso: ds = mnist_sample(n=6, train=False)
     """
-    return OptimizedPatchExtractor(
-        patch_size=(4, 4),
-        stride=2,
-        cache_dir=cache_dir,
-        image_size=(28, 28),
-        max_memory_cache=10
-    )
-
-
-@pytest.fixture
-def small_extractor(cache_dir):
-    """
-    Extractor para patches pequenos: 2x2, stride 1, imagem 14x14
-    """
-    return OptimizedPatchExtractor(
-        patch_size=(2, 2),
-        stride=1,
-        cache_dir=cache_dir,
-        image_size=(14, 14),
-        max_memory_cache=5
-    )
+    def _factory(n=6, train=False, transform=None):
+        try:
+            from torchvision.datasets import MNIST
+        except Exception:
+            pytest.skip("torchvision MNIST não disponível")
+        if transform is None:
+            transform = transforms.ToTensor()
+        try:
+            ds = MNIST(root=mnist_cache_dir, train=train, download=True, transform=transform)
+        except Exception as e:
+            pytest.skip(f"Não foi possível obter MNIST: {e}")
+        if n <= 0:
+            pytest.skip("mnist_sample requires n>0")
+        from torch.utils.data import Subset
+        return Subset(ds, list(range(min(n, len(ds)))))
+    return _factory
 
 
 @pytest.fixture
 def sample_pil_images():
     """
-    Conjunto de imagens PIL para testar diferentes casos.
+    Retorna um dicionário de PIL images de exemplo usados em alguns testes.
+    Corrige o uso deprecated de Image.fromarray(..., mode=...) garantindo uint8 dtype.
     """
     images = {}
+    H, W = 28, 28
 
-    # Gradiente horizontal (grayscale)
-    gradient_array = np.tile(np.linspace(0, 255, 28, dtype=np.uint8), (28, 1))
-    images['gradient'] = Image.fromarray(gradient_array, mode='L')
+    # grayscale gradient 0..255 uint8
+    grad = (np.tile(np.linspace(0, 255, W, dtype=np.uint8), (H, 1)))
+    images['gradient'] = Image.fromarray(grad)  # mode inferred as 'L'
 
-    # Imagem binária (preto e branco)
-    binary_array = np.zeros((28, 28), dtype=np.uint8)
-    binary_array[:14, :] = 255
-    images['binary'] = Image.fromarray(binary_array, mode='L')
+    # binary 0/255
+    binary_array = (np.indices((H, W)).sum(axis=0) % 2).astype(np.uint8) * 255
+    # Antes: Image.fromarray(binary_array, mode='L')  # deprecated
+    images['binary'] = Image.fromarray(binary_array)  # dtype uint8 -> mode 'L' inferido
 
-    # Padrão xadrez
-    checker = np.zeros((28, 28), dtype=np.uint8)
-    checker[::2, ::2] = 255
-    checker[1::2, 1::2] = 255
-    images['checkerboard'] = Image.fromarray(checker, mode='L')
-
-    # Imagem pequena (8x8)
-    small_array = np.random.randint(0, 256, (8, 8), dtype=np.uint8)
-    images['small'] = Image.fromarray(small_array, mode='L')
+    # RGB sample
+    rgb = np.zeros((H, W, 3), dtype=np.uint8)
+    rgb[..., 0] = np.linspace(0, 255, W, dtype=np.uint8)  # red gradient
+    rgb[..., 1] = np.linspace(255, 0, H, dtype=np.uint8)[:, None]  # green gradient
+    rgb[..., 2] = 128
+    images['rgb'] = Image.fromarray(rgb)  # mode 'RGB'
 
     return images
-
-
-@pytest.fixture
-def processed_dataset_configs():
-    """
-    Configurações comuns para ProcessedDataset.
-    """
-    return {
-        'basic': {
-            'target_size': (28, 28),
-            'resize_alg': Image.BICUBIC,
-            'image_format': None,
-            'quality': None,
-            'quantization_levels': None,
-            'quantization_method': 'uniform'
-        },
-        'binary': {
-            'target_size': (14, 14),
-            'resize_alg': Image.BICUBIC,
-            'image_format': None,
-            'quality': None,
-            'quantization_levels': 2,
-            'quantization_method': 'uniform'
-        },
-        'compressed': {
-            'target_size': (28, 28),
-            'resize_alg': Image.BICUBIC,
-            'image_format': 'JPEG',
-            'quality': 50,
-            'quantization_levels': None,
-            'quantization_method': 'uniform'
-        }
-    }
-
-
-@pytest.fixture
-def superres_configs():
-    """
-    Configurações para SuperResPatchDataset.
-    """
-    low_res = {
-        'target_size': (14, 14),
-        'resize_alg': Image.BICUBIC,
-        'image_format': None,
-        'quality': None,
-        'quantization_levels': 2,
-        'quantization_method': 'uniform'
-    }
-
-    high_res = {
-        'target_size': (28, 28),
-        'resize_alg': Image.BICUBIC,
-        'image_format': None,
-        'quality': None,
-        'quantization_levels': None,
-        'quantization_method': 'uniform'
-    }
-
-    return {
-        'low_res_config': low_res,
-        'high_res_config': high_res,
-        'small_patch_size': (2, 2),
-        'large_patch_size': (4, 4),
-        'stride': 1,
-        'scale_factor': 2
-    }
-
-
-@pytest.fixture
-def make_synthetic_dataset():
-    """
-    Factory para criar datasets sintéticos com diferentes características.
-    """
-
-    def _factory(n_samples=10, size=(28, 28), pattern='mixed', classes=None):
-        class SyntheticDataset(torch.utils.data.Dataset):
-            def __init__(self):
-                self.n_samples = n_samples
-                self.size = size
-                self.pattern = pattern
-                self.classes = classes or list(range(min(10, n_samples)))
-
-            def __len__(self):
-                return self.n_samples
-
-            def __getitem__(self, idx):
-                H, W = self.size
-
-                if self.pattern == 'gradient':
-                    img = self._make_gradient(H, W, idx)
-                elif self.pattern == 'circles':
-                    img = self._make_circle(H, W, idx)
-                elif self.pattern == 'mixed':
-                    # Alternar padrões baseado no índice
-                    if idx % 3 == 0:
-                        img = self._make_gradient(H, W, idx)
-                    elif idx % 3 == 1:
-                        img = self._make_circle(H, W, idx)
-                    else:
-                        img = self._make_noise(H, W, idx)
-                else:
-                    img = self._make_noise(H, W, idx)
-
-                img = img.clamp(0, 1).unsqueeze(0)  # [1, H, W]
-                label = self.classes[idx % len(self.classes)]
-                return img, label
-
-            def _make_gradient(self, H, W, seed):
-                torch.manual_seed(seed)  # Determinístico
-                angle = torch.rand(1) * 2 * np.pi
-                x = torch.arange(W).float()
-                y = torch.arange(H).float()
-                xx, yy = torch.meshgrid(x, y, indexing='ij')
-                direction = torch.cos(angle) * xx + torch.sin(angle) * yy
-                return (direction - direction.min()) / (direction.max() - direction.min())
-
-            def _make_circle(self, H, W, seed):
-                torch.manual_seed(seed)
-                center_y = torch.randint(H // 4, 3 * H // 4, (1,)).item()
-                center_x = torch.randint(W // 4, 3 * W // 4, (1,)).item()
-                radius = torch.randint(H // 8, H // 4, (1,)).item()
-
-                y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-                dist = torch.sqrt((y - center_y) ** 2 + (x - center_x) ** 2)
-                return (dist <= radius).float()
-
-            def _make_noise(self, H, W, seed):
-                torch.manual_seed(seed)
-                return torch.rand(H, W)
-
-        return SyntheticDataset()
-
-    return _factory
-
-
-@pytest.fixture(scope="session")
-def benchmark_timer():
-    """
-    Timer simples para benchmarks em testes.
-    """
-    import time
-
-    class Timer:
-        def __init__(self):
-            self.times = {}
-
-        def __enter__(self):
-            self.start = time.time()
-            return self
-
-        def __exit__(self, *args):
-            self.elapsed = time.time() - self.start
-
-        def record(self, name):
-            self.times[name] = getattr(self, 'elapsed', 0)
-
-        def get_results(self):
-            return self.times.copy()
-
-    return Timer
