@@ -1,10 +1,12 @@
 import pytest
 import torch
 from PIL import Image
-from torchvision import transforms
+# from torchvision import transforms  # não é mais necessário
 import numpy as np
 
 from patchkit import ProcessedDataset
+from patchkit.image_utils import to_pil
+
 
 def has_skimage():
     try:
@@ -31,7 +33,6 @@ def test_resize_quality_comparison(tmp_path, tiny_synthetic):
 
     # use a small batch (3) to reduce flakiness by averaging
     ds = tiny_synthetic(n=3, size=(28, 28), pattern="gradient")
-    to_pil = transforms.ToPILImage()
 
     results = {}
     for name, alg in algs:
@@ -51,7 +52,8 @@ def test_resize_quality_comparison(tmp_path, tiny_synthetic):
             orig = orig_tensor.squeeze().numpy()
             # processed.data shape: (N, C, H, W) and order is same as ds
             out = processed.data[i]
-            pil = to_pil(out)
+            # Usar to_pil padrão dos testes; informar modo 'L' (grayscale)
+            pil = to_pil(out, mode='L')
             up = pil.resize((orig.shape[1], orig.shape[0]), resample=Image.BICUBIC)
             recon = np.array(up).astype(np.float32)
             if recon.max() > 1.0:

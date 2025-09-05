@@ -9,11 +9,7 @@ from PIL import Image
 from pathlib import Path
 
 from patchkit import OptimizedPatchExtractor
-try:
-    from .image_utils import to_pil
-except Exception:
-    # fallback caso os testes não sejam executados como pacote
-    from tests.patchkit.image_utils import to_pil
+from patchkit.image_utils import to_pil
 
 class TestPatchExtractionBasic:
     """Testes básicos de extração de patches"""

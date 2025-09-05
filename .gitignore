@@ -14,3 +14,10 @@ quantized_sample.png
 /models_patches
 /.data
 /examples/outputs
+!examples/fubini/*.py
+examples/*.png
+examples/*.npz
+examples/*.txt
+examples/fubini/*.png
+examples/fubini/*.npz
+examples/fubini/*.txt

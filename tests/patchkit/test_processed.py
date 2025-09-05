@@ -10,6 +10,7 @@ from torchvision import transforms, datasets
 from pathlib import Path
 
 from patchkit import ProcessedDataset, OptimizedPatchExtractor
+from patchkit.image_utils import to_pil
 
 
 class TestProcessedDatasetBasic:
@@ -249,9 +250,10 @@ class TestProcessedDatasetIntegration:
             cache_dir=cache_dir, cache_rebuild=True
         )
 
-        # Converter primeira imagem para PIL
+        # Converter primeira imagem para PIL usando to_pil (padronizado)
         first_tensor = processed.data[0]  # [1, 28, 28]
-        first_pil = transforms.ToPILImage()(first_tensor.squeeze(0))
+        # to_pil aceita tensores CHW ou 1xHxW; informamos modo 'L' pois são imagens grayscale
+        first_pil = to_pil(first_tensor, mode='L')
 
         # Extrair patches
         extractor = OptimizedPatchExtractor(
