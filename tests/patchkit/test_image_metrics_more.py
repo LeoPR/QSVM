@@ -4,6 +4,7 @@ import pytest
 import importlib
 
 from patchkit.image_metrics import ImageMetrics
+from patchkit import optional_deps
 
 
 def test_psnr_uint8_vs_float_equivalence():
@@ -88,21 +89,50 @@ def test_compute_ssim_raises_informative_when_skimage_missing(monkeypatch):
     Simula ausência do pacote skimage e verifica que compute_ssim lança ImportError
     com mensagem informativa.
     """
-    # Guardar referência ao import original
+    # Limpa cache do loader central
+    optional_deps.clear_optional_cache()
+
+    # Remover 'skimage' e submódulos previamente carregados
+    import sys
+    for mod_name in list(sys.modules.keys()):
+        if mod_name == "skimage" or mod_name.startswith("skimage."):
+            monkeypatch.delitem(sys.modules, mod_name, raising=False)
+
+    # Bloquear futuras importações via importlib.import_module
+    orig_import_module = importlib.import_module
+
+    def fake_import_module(name, package=None):
+        if name == "skimage" or (isinstance(name, str) and name.startswith("skimage.")):
+            raise ImportError("mocked missing skimage")
+        return orig_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import_module)
+
+    # Coerência: fazer find_spec "não encontrar" skimage
+    import importlib.util as importlib_util
+    orig_find_spec = importlib_util.find_spec
+
+    def fake_find_spec(name, package=None):
+        if name == "skimage" or (isinstance(name, str) and name.startswith("skimage.")):
+            return None
+        return orig_find_spec(name, package)
+
+    monkeypatch.setattr(importlib_util, "find_spec", fake_find_spec)
+
+    # Opcional: também bloquear builtins.__import__ (redundante, mas robusto)
     orig_import = builtins.__import__
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        # Se tentar importar algo da árvore 'skimage', simular ImportError
         if name == "skimage" or (isinstance(name, str) and name.startswith("skimage.")):
             raise ImportError("mocked missing skimage")
         return orig_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    # Now call compute_ssim and expect ImportError
+    # Agora chamar compute_ssim e esperar ImportError
     with pytest.raises(ImportError) as excinfo:
         ImageMetrics.compute_ssim(np.zeros((4, 4)), np.zeros((4, 4)))
     msg = str(excinfo.value)
     assert "scikit-image" in msg or "skimage" in msg
 
-    # monkeypatch ensures original import is restored at teardown
+    # monkeypatch restaura importações no teardown do pytest
