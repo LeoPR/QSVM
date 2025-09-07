@@ -9,19 +9,94 @@ import torch.nn.functional as F
 from collections import OrderedDict
 from Logger import Logger
 
-def filter_active_patches(patches, min_mean=0.1, max_mean=0.9):
+def filter_active_patches(patches: torch.Tensor, min_mean: float = 0.1, max_mean: float = 0.9):
     """
-    Retorna apenas os patches cuja média está entre min_mean e max_mean.
-    Útil para filtrar patches "ativos" (nem só pretos, nem só brancos).
+    Filtra patches "ativos" e calcula score de informatividade para cada patch.
+
+    Entrada:
+      - patches: torch.Tensor [L, H, W] ou [L, C, H, W], dtype uint8 (0..255) ou float em [0,1].
+      - min_mean, max_mean: limites para considerar um patch "ativo" (média do patch no intervalo).
+
+    Saída (sempre):
+      - indices_ordenados: torch.LongTensor (K,) com índices dos patches ativos, ordenados do melhor para o pior
+                          segundo o score (melhor primeiro). Se nenhum patch for ativo, retorna tensor longo vazio.
+      - scores: torch.FloatTensor (L,) com o score de informatividade de cada patch (mesma heurística do utils).
+
+    Observações:
+      - A função não tenta suportar múltiplos formatos mágicamente; espera um tensor conforme descrito.
+      - Caso queira os patches ativos, use: patches[indices_ordenados]
+      - Se quiser um fallback quando indices_ordenados estiver vazio (ex.: índice central), trate no chamador.
     """
+    # validação básica
+    if not isinstance(patches, torch.Tensor):
+        raise TypeError("filter_active_patches espera um torch.Tensor com shape [L,H,W] ou [L,C,H,W]")
+
+    if patches.numel() == 0:
+        return torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.float32)
+
+    # normalizar para float em [0,1] se necessário
     p = patches.float()
-    if p.max() > 1.0:
+    try:
+        pmax = float(p.max().item())
+    except Exception:
+        pmax = 1.0
+    if pmax > 1.0:
         p = p / 255.0
+
+    # calcular média por patch (reduz canais se houver)
     means = p.mean(dim=(-2, -1))
     if means.dim() > 1:
         means = means.mean(dim=-1)
-    sel = (means > min_mean) & (means < max_mean)
-    return patches[sel]
+
+    sel_mask = (means > float(min_mean)) & (means < float(max_mean))
+    active_indices = torch.nonzero(sel_mask, as_tuple=False).squeeze(1)
+    if active_indices.numel() == 0:
+        # produzir tensor vazio do tipo long
+        active_indices = torch.tensor([], dtype=torch.long)
+
+    # calcular scores para todos os patches usando heurística previamente definida
+    L = p.shape[0]
+    scores = torch.zeros(L, dtype=torch.float32)
+
+    # usar CPU para operações de histograma / estatísticas (mais estável e compatível)
+    p_cpu = p.detach().cpu()
+
+    for i in range(L):
+        patch_i = p_cpu[i]
+        # converter para single-channel para análise
+        if patch_i.dim() == 3:
+            p_s = patch_i.mean(dim=0)
+        else:
+            p_s = patch_i
+        # variância
+        var = float(torch.var(p_s).item())
+        # histograma (16 bins em [0,1])
+        hist = torch.histc(p_s, bins=16, min=0.0, max=1.0)
+        hist = hist / (hist.sum() + 1e-8)
+        hist_nz = hist[hist > 0]
+        entropy = float((-(hist_nz * torch.log(hist_nz)).sum().item()) if hist_nz.numel() > 0 else 0.0)
+        # gradientes médios
+        dx = float(torch.abs(p_s[1:, :] - p_s[:-1, :]).mean().item()) if p_s.shape[0] > 1 else var
+        dy = float(torch.abs(p_s[:, 1:] - p_s[:, :-1]).mean().item()) if p_s.shape[1] > 1 else var
+        grad = 0.5 * (dx + dy)
+        mean_val = float(p_s.mean().item())
+        range_score = 4 * mean_val * (1 - mean_val)
+        contrast = float(p_s.max().item() - p_s.min().item())
+        # combinação heurística de métricas (mesma que utils.select_informative_patch)
+        score = 0.25 * var + 0.2 * (entropy / 3.0) + 0.2 * grad + 0.2 * range_score + 0.15 * contrast
+        scores[i] = float(score)
+
+    # ordenar os índices ativos por score desc (melhor primeiro)
+    if active_indices.numel() > 0:
+        # extrair scores dos ativos e ordenar
+        active_scores = scores[active_indices].cpu()
+        # obter ordem descendente
+        order_rel = torch.argsort(active_scores, descending=True)
+        ordered_active = active_indices[order_rel].long()
+    else:
+        ordered_active = torch.tensor([], dtype=torch.long)
+
+    return ordered_active, scores
 
 
 class OptimizedPatchExtractor:
@@ -202,7 +277,7 @@ class OptimizedPatchExtractor:
         recon_sum = F.fold(patches_flat, output_size=(recon_h, recon_w),
                            kernel_size=(ph, pw), stride=self.stride)  # [1, C, H, W]
 
-        # Create weight matrix (how many times each pixel was summed) using ones
+        # Create weight matrix (how many times cada pixel foi somado) usando ones
         ones = torch.ones_like(patches_f, dtype=patches_f.dtype, device=device)
         ones_flat = ones.view(L, -1).transpose(0, 1).unsqueeze(0)  # [1, C*ph*pw, L]
         weight = F.fold(ones_flat, output_size=(recon_h, recon_w),
