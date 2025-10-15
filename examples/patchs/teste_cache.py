@@ -35,6 +35,9 @@ try:
 except Exception:
     _HAS_ZSTD = False
 
+# Config centralizada de saídas/caches
+from examples.patchs.config import CACHE_QUAN_TEST_DIR, CACHE_ART_TEST_DIR, CACHE_PATCH_TEST_DIR  # alteração pontual
+
 # utilidades
 def _ensure_dir(d: Optional[str]):
     if d and not os.path.exists(d):
@@ -328,8 +331,8 @@ class PatchCacheWrapper:
 if __name__ == "__main__":  # teste rápido
     ds = torchvision.datasets.MNIST(root="./data", train=True, download=True, transform=torchvision.transforms.ToTensor())
     base = DatasetAdapter(ds)
-    q = QuantizeWrapper(base, levels=16, cache_dir=".cache/quan_test")
-    a = ArtefactWrapper(q, jpeg_quality=50, cache_dir=".cache/art_test")
-    p = PatchCacheWrapper(a, patch_size=(2,2), stride=1, cache_dir=".cache/patch_test", use_extractor=False)
+    q = QuantizeWrapper(base, levels=16, cache_dir=CACHE_QUAN_TEST_DIR)   # alteração pontual
+    a = ArtefactWrapper(q, jpeg_quality=50, cache_dir=CACHE_ART_TEST_DIR) # alteração pontual
+    p = PatchCacheWrapper(a, patch_size=(2,2), stride=1, cache_dir=CACHE_PATCH_TEST_DIR, use_extractor=False)  # alteração pontual
     item = p[0]
     print("len patches:", item["patches"].shape)

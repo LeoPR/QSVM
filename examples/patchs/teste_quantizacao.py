@@ -7,9 +7,12 @@ from patchkit.patches import filter_active_patches
 from PIL import Image
 import numpy as np
 
+# uso do config centralizado (apenas alteração pontual)
+from examples.patchs.config import OUTPUTS_ROOT
+
 # Parâmetros
 DATASET = "mnist"
-OUT_DIR = f"./examples/outputs/{DATASET}"
+OUT_DIR = os.path.join(OUTPUTS_ROOT, DATASET)  # apontamento para config (substitui ./examples/outputs/...)
 PATCH_SIZE = (7, 7)
 STRIDE = 3
 

@@ -32,6 +32,9 @@ from PIL import Image
 from patchkit import image_utils as iu
 from patchkit.image_metrics import ImageMetrics
 
+# importa config centralizado (apenas alteração pontual)
+from examples.patchs.config import OUTPUTS_ROOT
+
 # Preferir extractor e filtro do patchkit
 try:
     from patchkit.patches import OptimizedPatchExtractor, filter_active_patches
@@ -183,7 +186,7 @@ def compress_pil_to_jpeg(pil_img: Image.Image, quality: int) -> Image.Image:
 # Pipeline principal
 # -------------------------
 
-def main(classes=(1, 8), samples_per_class=2, out_root="examples/patch/outputs"):
+def main(classes=(1, 8), samples_per_class=2, out_root=OUTPUTS_ROOT):
     device = torch.device("cpu")
 
     conditions = [
@@ -411,4 +414,4 @@ def main(classes=(1, 8), samples_per_class=2, out_root="examples/patch/outputs")
 
 
 if __name__ == "__main__":
-    main(classes=(1, 8), samples_per_class=2, out_root="examples/patch/outputs")
+    main()

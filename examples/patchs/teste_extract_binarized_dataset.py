@@ -7,7 +7,10 @@ from torchvision import datasets, transforms
 from patchkit import ProcessedDataset
 from patchkit.patches import OptimizedPatchExtractor, filter_active_patches
 
-OUT_ROOT = "./examples/outputs/binarized_datasets"
+# uso do config centralizado (apenas alteração pontual)
+from examples.patchs.config import OUTPUTS_ROOT
+
+OUT_ROOT = os.path.join(OUTPUTS_ROOT, "binarized_datasets")
 os.makedirs(OUT_ROOT, exist_ok=True)
 
 def to_uint8_img_tensor(t: torch.Tensor) -> Image.Image:

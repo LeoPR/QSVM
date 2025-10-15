@@ -1,16 +1,9 @@
 *.pyc
 /.idea
-/data
 /experiments
-/cache/*_patches
-/cache/models
-/cache/*_res
 /qsvm_figs
-/cache_*
 Figure_1.png
-/.cache_test
 quantized_sample.png
-/cache
 /models_patches
 /.data
 /examples/outputs
@@ -23,6 +16,6 @@ examples/fubini/*.npz
 examples/fubini/*.txt
 /examples/.cache
 /examples/data
-/examples/patch/outputs
 /.cache
 /examples/patchs/outputs
+/data
