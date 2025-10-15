@@ -34,6 +34,8 @@ from patchkit.image_metrics import ImageMetrics
 
 # importa config centralizado (apenas alteração pontual)
 from examples.patchs.config import OUTPUTS_ROOT
+# utilitário compartilhado: normalize_patches_from_extractor
+from examples.patchs.utils import normalize_patches_from_extractor
 
 # Preferir extractor e filtro do patchkit
 try:
@@ -145,32 +147,6 @@ def overlay_patch_border(tile: np.ndarray, top: int, left: int, ph: int, pw: int
         if c1 - 1 >= 0 and r0 < r1:
             out[r0:r1, c1 - 1] = value
     return out
-
-
-def normalize_patches_from_extractor(raw) -> torch.Tensor:
-    """Converte saída do OptimizedPatchExtractor para [N,C,ps,ps] float [0,1]."""
-    if isinstance(raw, torch.Tensor):
-        t = raw
-    else:
-        import numpy as _np
-        if isinstance(raw, _np.ndarray):
-            t = torch.from_numpy(raw)
-        else:
-            try:
-                lst = [iu.to_tensor(x) if not isinstance(x, torch.Tensor) else x for x in raw]
-                t = torch.stack(lst, dim=0)
-            except Exception:
-                raise TypeError("Formato de saída do extractor não reconhecido")
-    if t.ndim == 3:
-        t = t.unsqueeze(1)
-    if t.ndim == 4:
-        if not torch.is_floating_point(t):
-            t = t.to(torch.float32) / 255.0
-        else:
-            t = t.to(torch.float32)
-    else:
-        raise ValueError("Formato de patches não suportado pelo normalizador")
-    return t
 
 
 def compress_pil_to_jpeg(pil_img: Image.Image, quality: int) -> Image.Image:

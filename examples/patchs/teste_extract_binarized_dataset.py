@@ -9,37 +9,11 @@ from patchkit.patches import OptimizedPatchExtractor, filter_active_patches
 
 # uso do config centralizado (apenas alteração pontual)
 from examples.patchs.config import OUTPUTS_ROOT
+# utilitários compartilhados (substituem funções locais duplicadas)
+from examples.patchs.utils import ensure_active, to_uint8_img_tensor
 
 OUT_ROOT = os.path.join(OUTPUTS_ROOT, "binarized_datasets")
 os.makedirs(OUT_ROOT, exist_ok=True)
-
-def to_uint8_img_tensor(t: torch.Tensor) -> Image.Image:
-    t = t.detach().cpu()
-    arr = (t.clamp(0,1).numpy() * 255.0).astype(np.uint8)
-    if arr.ndim == 3 and arr.shape[0] == 1:
-        return Image.fromarray(arr.squeeze(0), mode="L")
-    if arr.ndim == 3 and arr.shape[0] == 3:
-        return Image.fromarray(np.moveaxis(arr, 0, 2), mode="RGB")
-    if arr.ndim == 2:
-        return Image.fromarray(arr, mode="L")
-    raise ValueError("Formato tensor inesperado: " + str(arr.shape))
-
-def _ensure_active(result, patches):
-    import numpy as _np, torch as _t
-    cand = result[0] if isinstance(result, tuple) else result
-    if isinstance(cand, (list, tuple, _np.ndarray)) and _np.asarray(cand).ndim == 1:
-        idxs = _np.asarray(cand).astype(int)
-        try:
-            return patches[idxs]
-        except Exception:
-            return cand
-    if isinstance(cand, _t.Tensor) and cand.ndim == 1:
-        idxs = cand.long().cpu().numpy().astype(int)
-        try:
-            return patches[idxs]
-        except Exception:
-            return cand
-    return cand
 
 def save_active_patches_from_pil(pil_img, out_dir, patch_size=(4,4), stride=2, max_save=12,
                                  min_mean=0.05, max_mean=0.95):
@@ -50,7 +24,7 @@ def save_active_patches_from_pil(pil_img, out_dir, patch_size=(4,4), stride=2, m
     patches = extractor.process(pil_img, index=0)
     # patches returned uint8: [L, H, W] ou [L, C, H, W]
     res = filter_active_patches(patches, min_mean=min_mean, max_mean=max_mean)
-    active = _ensure_active(res, patches)
+    active = ensure_active(res, patches)
     nsave = min(int(active.shape[0]), max_save)
     for k in range(nsave):
         p = active[k]

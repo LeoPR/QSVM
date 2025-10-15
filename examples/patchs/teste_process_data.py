@@ -9,52 +9,10 @@ from patchkit.patches import filter_active_patches
 
 # uso do config centralizado (apenas alteração pontual)
 from examples.patchs.config import OUTPUTS_ROOT
+# utilitários compartilhados (substituem funções locais duplicadas)
+from examples.patchs.utils import ensure_active, to_uint8_img
 
 os.makedirs(OUTPUTS_ROOT, exist_ok=True)
-
-def to_uint8_img(t: torch.Tensor) -> Image.Image:
-    """
-    Converte tensor [1,H,W] ou [C,H,W] para PIL.Image (L ou RGB).
-    Assume valores em [0,1] ou uint8 0-255.
-    """
-    if isinstance(t, torch.Tensor):
-        t = t.detach().cpu()
-        if t.max() <= 1.0:
-            arr = (t.clamp(0, 1).numpy() * 255).astype(np.uint8)
-        else:
-            arr = t.numpy().astype(np.uint8)
-        if arr.ndim == 3 and arr.shape[0] in (1, 3):
-            if arr.shape[0] == 1:
-                return Image.fromarray(arr.squeeze(0), mode="L")
-            return Image.fromarray(np.moveaxis(arr, 0, 2), mode="RGB")
-        if arr.ndim == 2:
-            return Image.fromarray(arr, mode="L")
-        raise ValueError(f"Tensor shape não suportado: {tuple(arr.shape)}")
-    elif isinstance(t, np.ndarray):
-        if t.ndim == 2:
-            return Image.fromarray(t, mode="L")
-        if t.ndim == 3 and t.shape[2] == 3:
-            return Image.fromarray(t, mode="RGB")
-        raise ValueError("ndarray formato não suportado")
-    else:
-        raise ValueError("Tipo não suportado para conversão")
-
-def _ensure_active(result, patches):
-    import numpy as _np, torch as _t
-    cand = result[0] if isinstance(result, tuple) else result
-    if isinstance(cand, (list, tuple, _np.ndarray)) and _np.asarray(cand).ndim == 1:
-        idxs = _np.asarray(cand).astype(int)
-        try:
-            return patches[idxs]
-        except Exception:
-            return cand
-    if isinstance(cand, _t.Tensor) and cand.ndim == 1:
-        idxs = cand.long().cpu().numpy().astype(int)
-        try:
-            return patches[idxs]
-        except Exception:
-            return cand
-    return cand
 
 def main(n_classes=(1, 8), samples_per_class=3,
          pd_cfg=None, patch_size=(4,4), stride=2, max_patches_save=12):
@@ -120,7 +78,7 @@ def main(n_classes=(1, 8), samples_per_class=3,
                 pass
 
         res = filter_active_patches(patches, min_mean=0.05, max_mean=0.95)
-        active_patches = _ensure_active(res, patches)
+        active_patches = ensure_active(res, patches)
         print(f"Sample {i} class {label}: patches active {active_patches.shape[0]}/{patches.shape[0]}")
 
         patches_dir = os.path.join(sample_dir, "patches_active")
