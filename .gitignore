@@ -19,3 +19,4 @@ examples/fubini/*.txt
 /.cache
 /examples/patchs/outputs
 /data
+/examples/iris/outputs
