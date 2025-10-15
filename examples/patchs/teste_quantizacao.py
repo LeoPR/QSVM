@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import torch
 from torchvision import datasets, transforms
@@ -33,6 +34,30 @@ def print_quant_info(img, q, desc):
     print(f"Valores únicos: {[float(x) for x in uniq]}")
     print(f"Min: {float(q.min()):.3f}, Max: {float(q.max()):.3f}")
     print(f"Primeiros valores: {q.flatten()[0:10].tolist()}")
+
+def _ensure_active(result, patches):
+    """
+    Normaliza o retorno de filter_active_patches.
+    - se result é tupla, assume-se result[0] é a estrutura principal;
+    - se result[0] for índices 1D, indexa patches;
+    - caso contrário, retorna result[0] ou result.
+    """
+    import numpy as _np, torch as _t
+    cand = result[0] if isinstance(result, tuple) else result
+    # se cand é lista/array/torch tensor 1D -> interpret as indices
+    if isinstance(cand, (list, tuple, _np.ndarray)) and _np.asarray(cand).ndim == 1:
+        idxs = _np.asarray(cand).astype(int)
+        try:
+            return patches[idxs]
+        except Exception:
+            return cand
+    if isinstance(cand, _t.Tensor) and cand.ndim == 1:
+        idxs = cand.long().cpu().numpy().astype(int)
+        try:
+            return patches[idxs]
+        except Exception:
+            return cand
+    return cand
 
 def main():
     # Carregar MNIST (train), pegar 3 amostras de cada classe 1, 8
@@ -87,7 +112,9 @@ def main():
             img_patch = qimg.squeeze(0)
             patches = img_patch.unfold(0, PATCH_SIZE[0], STRIDE).unfold(1, PATCH_SIZE[1], STRIDE)
             patches = patches.contiguous().view(-1, PATCH_SIZE[0], PATCH_SIZE[1])
-            active_patches = filter_active_patches(patches, min_mean=0.05, max_mean=0.95)
+            res = filter_active_patches(patches, min_mean=0.05, max_mean=0.95)
+            active_patches = _ensure_active(res, patches)
+
             print(f"Patches ativos ({mname}): {active_patches.shape[0]}/{patches.shape[0]}")
 
             # Salvar até 5 patches ativos

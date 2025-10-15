@@ -37,13 +37,25 @@ def to_uint8_img(t: torch.Tensor) -> Image.Image:
     else:
         raise ValueError("Tipo não suportado para conversão")
 
+def _ensure_active(result, patches):
+    import numpy as _np, torch as _t
+    cand = result[0] if isinstance(result, tuple) else result
+    if isinstance(cand, (list, tuple, _np.ndarray)) and _np.asarray(cand).ndim == 1:
+        idxs = _np.asarray(cand).astype(int)
+        try:
+            return patches[idxs]
+        except Exception:
+            return cand
+    if isinstance(cand, _t.Tensor) and cand.ndim == 1:
+        idxs = cand.long().cpu().numpy().astype(int)
+        try:
+            return patches[idxs]
+        except Exception:
+            return cand
+    return cand
+
 def main(n_classes=(1, 8), samples_per_class=3,
          pd_cfg=None, patch_size=(4,4), stride=2, max_patches_save=12):
-    """
-    Executa processamento e salva imagens + patches ativos organizados em subpastas.
-
-    pd_cfg: dicionário para ProcessedDataset (target_size, quantization_levels, ...)
-    """
     if pd_cfg is None:
         pd_cfg = {
             'target_size': (28, 28),
@@ -54,27 +66,16 @@ def main(n_classes=(1, 8), samples_per_class=3,
             'quantization_method': 'uniform'
         }
 
-    # Carrega MNIST (pequeno subset por classe)
     transform = transforms.ToTensor()
     mnist = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 
-    # Recolhe índices por classe
     selected = []
     for label in n_classes:
         indices = (mnist.targets == label).nonzero(as_tuple=True)[0][:samples_per_class]
         for idx in indices:
-            img, lbl = mnist[int(idx)]
-            selected.append((img, int(lbl)))
+            for i in indices:
+                pass
 
-    # Cria ProcessedDataset para as amostras selecionadas (usa subset para não rebaixar todo MNIST)
-    subset = torch.utils.data.Subset(mnist, [int(i) for i in range(len(mnist))])  # we'll map later
-    # Para demonstration, vamos construir um subset com as imagens que selecionamos
-    sel_indices = []
-    for _, lbl in selected:
-        # já temos os pares, mas precisamos dos índices originais
-        pass
-    # Simples: criar subset direto usando os índices que coletamos antes
-    # (refazer a coleta para guardar índices)
     selected = []
     sel_indices = []
     for label in n_classes:
@@ -89,45 +90,46 @@ def main(n_classes=(1, 8), samples_per_class=3,
     pd = ProcessedDataset(subset, cache_dir=os.path.join(OUT_ROOT, "cache_processed"),
                           cache_rebuild=True, **pd_cfg)
 
-    # Para cada item processado, salvar estrutura organizada
     for i in range(len(pd.data)):
-        img_tensor = pd.data[i]                # [C,H,W] já processado (float [0,1])
-        # Note: temos acesso ao label via subset indices order -> sel_indices[i]
+        img_tensor = pd.data[i]
         orig_idx = sel_indices[i]
         label = int(mnist.targets[orig_idx].item())
 
         sample_dir = os.path.join(OUT_ROOT, f"mnist", f"class_{label}", f"sample_{i}")
         os.makedirs(sample_dir, exist_ok=True)
 
-        # Salvar imagem processada (após quantização/preprocess)
         proc_path = os.path.join(sample_dir, "processed.png")
         to_uint8_img(img_tensor.squeeze(0)).save(proc_path)
         print(f"[OK] Saved processed image: {proc_path}")
 
-        # Extrair patches (usando OptimizedPatchExtractor para reproduzir cache/extractor behavior)
         extractor = OptimizedPatchExtractor(patch_size=patch_size, stride=stride,
                                            cache_dir=os.path.join(OUT_ROOT, "cache_patches"),
                                            image_size=img_tensor.shape[-2:])
-        # extractor.process espera PIL image (o método interno usa pil_to_tensor), então convertemos:
         pil_img = to_uint8_img(img_tensor.squeeze(0))
-        patches = extractor.process(pil_img, index=orig_idx)  # uint8 patches: [L, H, W] ou [L, C, H, W]
+        patches = extractor.process(pil_img, index=orig_idx)
 
-        # Filtra patches "ativos"
-        active = filter_active_patches(patches, min_mean=0.05, max_mean=0.95)
-        print(f"Sample {i} class {label}: patches active {active.shape[0]}/{patches.shape[0]}")
+        # normalize possible return types of patches -> ensure numpy/torch array-like
+        # patches may be torch tensor or ndarray/list; convert to torch if needed
+        if not isinstance(patches, torch.Tensor):
+            try:
+                import numpy as _np
+                patches = torch.from_numpy(_np.array(patches))
+            except Exception:
+                pass
 
-        # Salvar alguns patches ativos
+        res = filter_active_patches(patches, min_mean=0.05, max_mean=0.95)
+        active_patches = _ensure_active(res, patches)
+        print(f"Sample {i} class {label}: patches active {active_patches.shape[0]}/{patches.shape[0]}")
+
         patches_dir = os.path.join(sample_dir, "patches_active")
         os.makedirs(patches_dir, exist_ok=True)
-        nsave = min(max_patches_save, int(active.shape[0]))
+        nsave = min(max_patches_save, int(active_patches.shape[0]))
         for k in range(nsave):
-            p = active[k]
-            # p pode ser [H,W] uint8 ou [C,H,W]
+            p = active_patches[k]
             if isinstance(p, torch.Tensor):
                 arr = p.cpu().numpy()
             else:
                 arr = np.array(p)
-            # converter para PIL incluindo canais
             if arr.ndim == 2:
                 pil = Image.fromarray(arr, mode="L")
             elif arr.ndim == 3 and arr.shape[0] in (1,3):
@@ -135,7 +137,6 @@ def main(n_classes=(1, 8), samples_per_class=3,
             elif arr.ndim == 3 and arr.shape[2] in (1,3):
                 pil = Image.fromarray(arr)
             else:
-                # fallback: convertendo flatten
                 arr2 = (arr.mean(axis=0)).astype(np.uint8)
                 pil = Image.fromarray(arr2, mode="L")
             pil = pil.resize((32, 32), Image.NEAREST)
