@@ -10,8 +10,7 @@ from patchkit.patches import filter_active_patches
 # uso do config centralizado (apenas alteração pontual)
 from examples.patchs.config import OUTPUTS_ROOT
 
-OUT_ROOT = os.path.join(OUTPUTS_ROOT, "outputs")  # apontamento para config (substitui caminho local)
-os.makedirs(OUT_ROOT, exist_ok=True)
+os.makedirs(OUTPUTS_ROOT, exist_ok=True)
 
 def to_uint8_img(t: torch.Tensor) -> Image.Image:
     """
@@ -90,7 +89,7 @@ def main(n_classes=(1, 8), samples_per_class=3,
 
     subset = torch.utils.data.Subset(mnist, sel_indices)
 
-    pd = ProcessedDataset(subset, cache_dir=os.path.join(OUT_ROOT, "cache_processed"),
+    pd = ProcessedDataset(subset, cache_dir=os.path.join(OUTPUTS_ROOT, "cache_processed"),
                           cache_rebuild=True, **pd_cfg)
 
     for i in range(len(pd.data)):
@@ -98,7 +97,7 @@ def main(n_classes=(1, 8), samples_per_class=3,
         orig_idx = sel_indices[i]
         label = int(mnist.targets[orig_idx].item())
 
-        sample_dir = os.path.join(OUT_ROOT, f"mnist", f"class_{label}", f"sample_{i}")
+        sample_dir = os.path.join(OUTPUTS_ROOT, f"mnist", f"class_{label}", f"sample_{i}")
         os.makedirs(sample_dir, exist_ok=True)
 
         proc_path = os.path.join(sample_dir, "processed.png")
@@ -106,7 +105,7 @@ def main(n_classes=(1, 8), samples_per_class=3,
         print(f"[OK] Saved processed image: {proc_path}")
 
         extractor = OptimizedPatchExtractor(patch_size=patch_size, stride=stride,
-                                           cache_dir=os.path.join(OUT_ROOT, "cache_patches"),
+                                           cache_dir=os.path.join(OUTPUTS_ROOT, "cache_patches"),
                                            image_size=img_tensor.shape[-2:])
         pil_img = to_uint8_img(img_tensor.squeeze(0))
         patches = extractor.process(pil_img, index=orig_idx)
@@ -147,7 +146,7 @@ def main(n_classes=(1, 8), samples_per_class=3,
             pil.save(outp)
         print(f"[OK] Saved {nsave} active patches in {patches_dir}")
 
-    print("[DONE] Example processing completed. Outputs in:", OUT_ROOT)
+    print("[DONE] Example processing completed. Outputs in:", OUTPUTS_ROOT)
 
 if __name__ == "__main__":
     main()
