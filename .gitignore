@@ -24,3 +24,4 @@ examples/fubini/*.txt
 /examples/.cache
 /examples/data
 /examples/patch/outputs
+/.cache
