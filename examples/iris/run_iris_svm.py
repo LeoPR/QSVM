@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from sklearn import datasets
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.decomposition import PCA
 from sklearn.svm import SVC
@@ -21,7 +21,8 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # config local
 from examples.iris.config import OUTPUTS_ROOT, RANDOM_SEED, TEST_SIZE
 
-KERNELS = ["linear", "poly", "rbf"]
+# kernels a comparar (adicionando 'qkernel' de PennyLane)
+KERNELS = ["linear", "poly", "rbf", "qkernel"]
 
 def _ensure_dir(p):
     os.makedirs(p, exist_ok=True)
@@ -60,7 +61,6 @@ def plot_3d_scatter(Xp, y, train_idx, outpath, title="3D PCA - train/test"):
     labels = np.unique(y)
     for lbl in labels:
         sel = (y == lbl)
-        # train points of this label
         sel_train = sel & train_idx
         sel_test = sel & (~train_idx)
         if sel_train.any():
@@ -91,11 +91,10 @@ def main():
     X_train_s = scaler.transform(X_train)
     X_test_s = scaler.transform(X_test)
 
-    # preparar PCA (fit no dataset completo para visual consistente)
+    # PCA (para visual 3D consistente)
     pca = PCA(n_components=3).fit(np.vstack([X_train_s, X_test_s]))
     X_all_s = np.vstack([X_train_s, X_test_s])
     Xp = pca.transform(X_all_s)
-    # índice booleano para treino/teste no array concatenado
     n_train = X_train_s.shape[0]
     train_idx = np.zeros(X_all_s.shape[0], dtype=bool)
     train_idx[:n_train] = True
@@ -104,14 +103,38 @@ def main():
     results = []
     for kernel in KERNELS:
         out_dir = _ensure_dir(os.path.join(OUTPUTS_ROOT, kernel))
-        # instanciar SVC (poly com degree=3)
-        if kernel == "poly":
-            clf = SVC(kernel=kernel, degree=3, probability=False, random_state=RANDOM_SEED)
+
+        if kernel in ("linear", "poly", "rbf"):
+            if kernel == "poly":
+                clf = SVC(kernel=kernel, degree=3, probability=False, random_state=RANDOM_SEED)
+            else:
+                clf = SVC(kernel=kernel, probability=False, random_state=RANDOM_SEED)
+            clf.fit(X_train_s, y_train)
+            y_pred = clf.predict(X_test_s)
+
+        elif kernel == "qkernel":
+            # Importa utilitário quântico só quando necessário
+            try:
+                from examples.iris.quantum_utils import QuantumKernelPL
+            except Exception as e:
+                print(f"[SKIP] qkernel indisponível ({e}). Pulei este kernel.")
+                continue
+            # Mapeia para ângulos (RY): [0, 2π] baseado em dados normalizados
+            ang_scaler = MinMaxScaler(feature_range=(0.0, 2*np.pi)).fit(X_train_s)
+            Xtr_ang = ang_scaler.transform(X_train_s)
+            Xte_ang = ang_scaler.transform(X_test_s)
+
+            qk = QuantumKernelPL(n_qubits=X.shape[1])
+            Ktr = qk.compute_matrix(Xtr_ang, Xtr_ang)
+            Kte = qk.compute_matrix(Xte_ang, Xtr_ang)
+
+            clf = SVC(kernel="precomputed", probability=False, random_state=RANDOM_SEED)
+            clf.fit(Ktr, y_train)
+            y_pred = clf.predict(Kte)
+
         else:
-            clf = SVC(kernel=kernel, probability=False, random_state=RANDOM_SEED)
-        # treinar usando apenas treino
-        clf.fit(X_train_s, y_train)
-        y_pred = clf.predict(X_test_s)
+            continue
+
         acc = float(accuracy_score(y_test, y_pred))
         rep = classification_report(y_test, y_pred, target_names=target_names)
         cm = confusion_matrix(y_test, y_pred)
@@ -125,7 +148,7 @@ def main():
         plot_3d_scatter(Xp, y_all, train_idx, os.path.join(out_dir, "train_test_3d.png"),
                         title=f"Iris PCA 3D - kernel={kernel}")
 
-        # salvar previsões (opcional, pequeno CSV)
+        # salvar previsões (CSV pequeno)
         preds_path = os.path.join(out_dir, "predictions.csv")
         header = "split,row_index,y_true,y_pred"
         rows = []
@@ -139,31 +162,34 @@ def main():
         print(f"[OK] kernel={kernel} acc={acc:.4f} -> outputs in {out_dir}")
 
     # resumo comparativo
-    out_acc_csv = os.path.join(OUTPUTS_ROOT, "accuracies.csv")
-    with open(out_acc_csv, "w", encoding="utf-8") as f:
-        f.write("kernel,accuracy\n")
+    if results:
+        out_acc_csv = os.path.join(OUTPUTS_ROOT, "accuracies.csv")
+        with open(out_acc_csv, "w", encoding="utf-8") as f:
+            f.write("kernel,accuracy\n")
+            for r in results:
+                f.write(f"{r['kernel']},{r['accuracy']:.6f}\n")
+
+        # barplot
+        plt.figure(figsize=(5,3))
+        kernels = [r["kernel"] for r in results]
+        accs = [r["accuracy"] for r in results]
+        plt.bar(kernels, accs, color=["tab:blue","tab:orange","tab:green","tab:red"][:len(kernels)])
+        plt.ylim(0,1)
+        plt.ylabel("accuracy")
+        plt.title("Iris SVM: kernel comparison")
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUTPUTS_ROOT, "accuracies.png"), dpi=150)
+        plt.close()
+
+        # resumo JSON
+        with open(os.path.join(OUTPUTS_ROOT, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+
+        print("\nResumo salvo em:", OUTPUTS_ROOT)
         for r in results:
-            f.write(f"{r['kernel']},{r['accuracy']:.6f}\n")
-
-    # barplot
-    plt.figure(figsize=(5,3))
-    kernels = [r["kernel"] for r in results]
-    accs = [r["accuracy"] for r in results]
-    plt.bar(kernels, accs, color=["tab:blue","tab:orange","tab:green"])
-    plt.ylim(0,1)
-    plt.ylabel("accuracy")
-    plt.title("Iris SVM: kernel comparison")
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUTS_ROOT, "accuracies.png"), dpi=150)
-    plt.close()
-
-    # resumo JSON
-    with open(os.path.join(OUTPUTS_ROOT, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2)
-
-    print("\nResumo salvo em:", OUTPUTS_ROOT)
-    for r in results:
-        print(f" - {r['kernel']}: {r['accuracy']:.4f}")
+            print(f" - {r['kernel']}: {r['accuracy']:.4f}")
+    else:
+        print("[WARN] Nenhum resultado para salvar (talvez qkernel sem PennyLane).")
 
 if __name__ == "__main__":
     main()
